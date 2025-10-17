@@ -6,7 +6,7 @@ from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import bcrypt
 import jwt
@@ -340,7 +340,7 @@ def get_by_id(id):
     return jsonify(doc), 200
 
 @app.route("/api/assets/<id>", methods=["PUT"])
-@require_role("Super_Admin", "Admin")
+@require_role("Super_Admin", "Admin","Verifier")
 def update_asset(id):
     try:
         oid = ObjectId(id)
@@ -360,6 +360,14 @@ def update_asset(id):
                 update[f] = bool(data[f])
             else:
                 update[f] = str(data[f]).strip()
+
+    # Alias and auto-stamp for verification fields
+    if "verifiedBy" in data and "verified_by" not in update:
+        update["verified_by"] = str(data["verifiedBy"]).strip()
+    if "verified" in data:
+        update["verified"] = bool(data["verified"])
+    if update.get("verified") is True and "verification_date" not in update:
+        update["verification_date"] = datetime.now(timezone.utc).isoformat()
 
     if "assigned_type" in update:
         if update["assigned_type"] not in ("individual", "general"):
@@ -418,10 +426,6 @@ def institute_serial_prefix(institute: str) -> str:
     return inst[:1] or "X"
 
 def next_serial_for_institute(institute: str) -> str:
-    """
-    Return next free serial like U01, U02... per institute.
-    Uses a best-effort max lookup, then probes for a free slot.
-    """
     inst = (institute or "").strip().upper()
     prefix = institute_serial_prefix(inst)
     cur = qr_registry.find(
@@ -443,10 +447,6 @@ def next_serial_for_institute(institute: str) -> str:
 @app.route("/api/qr/bulk", methods=["POST"])
 @require_role("Super_Admin", "Admin")
 def qr_bulk():
-    """
-    Body: { "institute": "UVPCE", "department": "IT", "quantity": 20 }
-    Returns: { "count": N, "items": [ {qr_id, serial_no, institute, department, ts, _id}, ... ] }
-    """
     body = request.get_json(silent=True) or {}
     institute = (body.get("institute") or body.get("college") or "").strip()
     department = (body.get("department") or "").strip()
@@ -499,6 +499,29 @@ def qr_bulk():
 
     return jsonify({"count": len(results), "items": results}), 201
 
+# Fields to mirror from an Asset when enriching QR responses
+ASSET_FIELDS = [
+    "registration_number",
+    "asset_name", "category", "location", "assign_date", "status",
+    "desc", "verification_date", "verified", "verified_by",
+    "institute", "department", "assigned_type", "assigned_faculty_name"
+]
+
+def enrich_qr_with_asset(qr_doc):
+    """If QR is linked, copy selected fields from the Asset into the outgoing QR JSON; else ensure keys exist."""
+    out = dict(qr_doc)
+    if "asset_id" in qr_doc and isinstance(qr_doc.get("asset_id"), ObjectId):
+        aid = qr_doc["asset_id"]
+        asset_doc = assets.find_one({"_id": aid}, {f: 1 for f in ASSET_FIELDS})
+        if asset_doc:
+            for f in ASSET_FIELDS:
+                out[f] = asset_doc.get(f, out.get(f, ""))
+        out["asset_id"] = str(aid)
+    else:
+        for f in ASSET_FIELDS:
+            out[f] = qr_doc.get(f, out.get(f, ""))
+    return out
+
 @app.route("/api/qr", methods=["GET"])
 @require_auth
 def qr_list():
@@ -522,16 +545,12 @@ def qr_list():
     skip = (page - 1) * size
 
     total = qr_registry.count_documents(q)
-    cur = qr_registry.find(q).sort([("created_at", DESCENDING)]).skip(skip).limit(size)
+    cur = qr_registry.find(q).sort([("created_at", DESCENDING), ("_id", DESCENDING)]).skip(skip).limit(size)
 
     items = []
     for d in cur:
         d["_id"] = str(d["_id"])
-        # default empty asset-style fields for UI
-        d["asset_name"] = d.get("asset_name", "")
-        d["status"] = d.get("status", "")
-        d["assign_date"] = d.get("assign_date", "")
-        items.append(d)
+        items.append(enrich_qr_with_asset(d))
 
     return jsonify({"total": total, "page": page, "size": size, "items": items}), 200
 
@@ -542,9 +561,8 @@ def qr_get_by_id(qr_id):
     if not doc:
         return jsonify({"error": "Not found"}), 404
     doc["_id"] = str(doc["_id"])
-    if "asset_id" in doc and isinstance(doc.get("asset_id"), ObjectId):
-        doc["asset_id"] = str(doc["asset_id"])
-    return jsonify(doc), 200
+    enriched = enrich_qr_with_asset(doc)
+    return jsonify(enriched), 200
 
 # NEW: editable fields for bulk QR scan-to-fill
 QR_EDITABLE = {
@@ -567,6 +585,12 @@ def qr_update_fields(qr_id):
         else:
             update[k] = ("" if v is None else str(v).strip())
 
+    # Accept camelCase alias and auto-stamp verification_date when verifying
+    if "verifiedBy" in body and "verified_by" not in update:
+        update["verified_by"] = str(body["verifiedBy"]).strip()
+    if update.get("verified") is True and "verification_date" not in update:
+        update["verification_date"] = datetime.now(timezone.utc).isoformat()
+
     if not update:
         return jsonify({"error": "No editable fields supplied"}), 400
 
@@ -579,9 +603,8 @@ def qr_update_fields(qr_id):
         return jsonify({"error": "QR not found"}), 404
 
     doc["_id"] = str(doc["_id"])
-    if "asset_id" in doc and isinstance(doc.get("asset_id"), ObjectId):
-        doc["asset_id"] = str(doc["asset_id"])
-    return jsonify(doc), 200
+    enriched = enrich_qr_with_asset(doc)
+    return jsonify(enriched), 200
 
 @app.route("/api/qr/<path:qr_id>/link-asset/<id>", methods=["PATCH"])
 @require_auth
@@ -598,9 +621,8 @@ def qr_link_asset(qr_id, id):
     if not upd:
         return jsonify({"error": "QR not found"}), 404
     upd["_id"] = str(upd["_id"])
-    if "asset_id" in upd and isinstance(upd.get("asset_id"), ObjectId):
-        upd["asset_id"] = str(upd["asset_id"])
-    return jsonify(upd), 200
+    enriched = enrich_qr_with_asset(upd)
+    return jsonify(enriched), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)

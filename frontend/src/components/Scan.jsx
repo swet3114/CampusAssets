@@ -239,7 +239,7 @@ export default function Scan() {
     e.preventDefault();
     setStatusMsg(null);
 
-    // Bulk path: PATCH into QrRegistry doc
+    // Bulk path: PATCH into QrRegistry doc (verification_date will be auto-stamped server-side)
     if (mode === "bulk" && qrDoc?.qr_id) {
       try {
         const payload = {
@@ -249,7 +249,7 @@ export default function Scan() {
           assign_date: form.assign_date,
           status: form.status,
           desc: form.desc,
-          verification_date: form.verification_date,
+          // Do not send verification_date; server will stamp when verified=true
           verified: !!form.verified,
           verified_by: form.verified_by,
           institute: form.institute,
@@ -270,6 +270,8 @@ export default function Scan() {
         } else {
           setStatusMsg({ ok: true, msg: "Saved to QR registry" });
           setQrDoc(data);
+          // Reflect server-stamped date in form if present
+          setForm((f) => ({ ...f, verification_date: data.verification_date || f.verification_date }));
         }
       } catch {
         setStatusMsg({ ok: false, msg: "Network error" });
@@ -277,7 +279,7 @@ export default function Scan() {
       return;
     }
 
-    // Single path: PUT into Assets
+    // Single path: PUT into Assets (verification_date auto-stamped server-side)
     if (mode === "single" && asset?._id) {
       try {
         const payload = {
@@ -291,6 +293,9 @@ export default function Scan() {
           department: form.department,
           assigned_type: form.assigned_type,
           assigned_faculty_name: needsFaculty ? form.assigned_faculty_name : "",
+          // Explicitly send verification fields; server will add verification_date if verified=true
+          verified: !!form.verified,
+          verified_by: form.verified_by,
         };
 
         const res = await fetch(`${API}/api/assets/${asset._id}`, {
@@ -304,7 +309,8 @@ export default function Scan() {
           setStatusMsg({ ok: false, msg: data.error || "Failed to update" });
         } else {
           setStatusMsg({ ok: true, msg: "Updated successfully" });
-          setAsset((a) => a && { ...a, ...payload });
+          setAsset((a) => a && { ...a, ...payload, verification_date: data.verification_date || a.verification_date });
+          setForm((f) => ({ ...f, verification_date: data.verification_date || f.verification_date }));
         }
       } catch {
         setStatusMsg({ ok: false, msg: "Network error" });
