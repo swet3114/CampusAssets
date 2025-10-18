@@ -1,6 +1,8 @@
 // src/components/BulkInventory.jsx
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import QRCode from "qrcode";
+import * as XLSX from "xlsx";
+import { saveAs } from "file-saver";
 
 const API = "http://localhost:5000";
 
@@ -12,12 +14,88 @@ const USED_OPTIONS = [
   { value: "true", label: "Linked" },
 ];
 
+// ---------- Excel helpers ----------
+function downloadExcel(rows, filenamePrefix = "bulk_inventory") {
+  const headers = [
+    // QR registry fields
+    "serial_no",
+    "qr_id",
+    "institute",
+    "department",
+    "ts",
+    "used",
+    "linked_at",
+    // Mirrored asset-like fields
+    "registration_number",
+    "asset_name",
+    "category",
+    "location",
+    "assign_date",
+    "status",
+    "desc",
+    "verification_date",
+    "verified",
+    "verified_by",
+    "assigned_type",
+    "assigned_faculty_name",
+  ];
+
+  const data = rows.map((r) => {
+    const obj = {};
+    headers.forEach((h) => {
+      let v = r[h];
+      if (typeof v === "boolean") v = v ? "true" : "false";
+      if (v == null) v = "";
+      obj[h] = v;
+    });
+    return obj;
+  });
+
+  const ws = XLSX.utils.json_to_sheet(data, { header: headers });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "BulkInventory");
+
+  const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+  const blob = new Blob([wbout], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  saveAs(blob, `${filenamePrefix}_${stamp}.xlsx`);
+}
+
+// Server-cap-aware paginator for both viewing (All) and export
+async function fetchAllMatchingQR({ inst, dept, used }) {
+  const CHUNK = 100; // must match backend cap in /api/qr
+  const base = new URLSearchParams();
+  if (inst) base.set("institute", inst);
+  if (dept) base.set("department", dept);
+  if (used) base.set("used", used);
+
+  const all = [];
+  let page = 1;
+  for (;;) {
+    const p = new URLSearchParams(base);
+    p.set("page", String(page));
+    p.set("size", String(CHUNK));
+    const res = await fetch(`${API}/api/qr?${p.toString()}`, { credentials: "include" });
+    if (!res.ok) throw new Error(`Fetch failed on page ${page}`);
+    const data = await res.json();
+    const batch = Array.isArray(data.items) ? data.items : [];
+    all.push(...batch);
+    if (batch.length < CHUNK) break; // last page reached
+    page += 1;
+  }
+  return all;
+}
+
 export default function BulkInventory() {
   const [items, setItems] = useState([]);
   const [inst, setInst] = useState("");
   const [dept, setDept] = useState("");
   const [used, setUsed] = useState("");
   const [page, setPage] = useState(1);
+  // size === 0 means "All"
   const [size, setSize] = useState(25);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -30,6 +108,7 @@ export default function BulkInventory() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailErr, setDetailErr] = useState("");
 
+  // Build query params (for paged mode only)
   const params = useMemo(() => {
     const p = new URLSearchParams();
     if (inst) p.set("institute", inst);
@@ -40,22 +119,36 @@ export default function BulkInventory() {
     return p.toString();
   }, [inst, dept, used, page, size]);
 
-  useEffect(() => {
-    let alive = true;
+  // Load list
+  const fetchList = useCallback(async (signal) => {
     setLoading(true);
     setErr("");
-    fetch(`${API}/api/qr?${params}`, { credentials: "include" })
-      .then(async (r) => {
-        if (!alive) return;
-        if (!r.ok) throw new Error("load");
-        const data = await r.json();
-        setItems(data.items || []);
-        setTotal(data.total || 0);
-      })
-      .catch(() => alive && setErr("Failed to load"))
-      .finally(() => alive && setLoading(false));
-    return () => { alive = false; };
-  }, [params]);
+    try {
+      if (size === 0) {
+        // All mode: page through server cap to get everything
+        const all = await fetchAllMatchingQR({ inst, dept, used });
+        setItems(all);
+        setTotal(all.length);
+        return;
+      }
+      // Paged mode
+      const r = await fetch(`${API}/api/qr?${params}`, { credentials: "include", signal });
+      if (!r.ok) throw new Error("load");
+      const data = await r.json();
+      setItems(Array.isArray(data.items) ? data.items : []);
+      setTotal(Number.isFinite(data.total) ? data.total : 0);
+    } catch (e) {
+      if (e.name !== "AbortError") setErr("Failed to load");
+    } finally {
+      setLoading(false);
+    }
+  }, [params, size, inst, dept, used]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    fetchList(ctrl.signal);
+    return () => ctrl.abort();
+  }, [fetchList]);
 
   const onGenerateQR = async (row) => {
     try {
@@ -90,7 +183,7 @@ export default function BulkInventory() {
     }
   };
 
-  const totalPages = Math.max(1, Math.ceil(total / size));
+  const totalPages = size === 0 ? 1 : Math.max(1, Math.ceil(total / size));
 
   const onViewDetails = async (row) => {
     setSelected(row);
@@ -98,6 +191,7 @@ export default function BulkInventory() {
     setDetailErr("");
     setDetail(null);
 
+    // If linked to an Asset, fetch the full asset document and merge
     if (row.used && row.asset_id) {
       setDetailLoading(true);
       try {
@@ -107,6 +201,7 @@ export default function BulkInventory() {
           setDetail(row);
         } else {
           const asset = await res.json();
+          // Prefer server's authoritative fields merged over the QR row
           setDetail({ ...row, ...asset });
         }
       } catch {
@@ -116,7 +211,30 @@ export default function BulkInventory() {
         setDetailLoading(false);
       }
     } else {
+      // Not linked or no asset_id yet
       setDetail(row);
+    }
+  };
+
+  // Close modal and refresh list to reflect any updates
+  const onCloseModal = async () => {
+    setOpen(false);
+    setSelected(null);
+    setDetail(null);
+    setDetailErr("");
+    setDetailLoading(false);
+    const ctrl = new AbortController();
+    await fetchList(ctrl.signal);
+  };
+
+  // Download all filtered rows regardless of current page/size
+  const onDownloadAllFiltered = async () => {
+    try {
+      const allRows = await fetchAllMatchingQR({ inst, dept, used });
+      const prefix = inst || dept || used ? "bulk_inventory_filtered_all" : "bulk_inventory_all";
+      downloadExcel(allRows, prefix);
+    } catch {
+      alert("Failed to download full report");
     }
   };
 
@@ -124,34 +242,89 @@ export default function BulkInventory() {
     <div className="bg-white rounded shadow p-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold mb-3">Bulk Inventory</h2>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onDownloadAllFiltered}
+            className="px-3 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700 text-sm"
+            title="Export all matching records"
+          >
+            Download report
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
       <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-3">
-        <select className="border rounded px-3 py-2" value={inst}
-                onChange={(e) => { setPage(1); setInst(e.target.value); }}>
-          {INSTITUTES.map((v) => <option key={v || "all"} value={v}>{v || "All institutes"}</option>)}
+        <select
+          className="border rounded px-3 py-2"
+          value={inst}
+          onChange={(e) => { setPage(1); setInst(e.target.value); }}
+        >
+          {INSTITUTES.map((v) => (
+            <option key={v || "all"} value={v}>
+              {v || "All institutes"}
+            </option>
+          ))}
         </select>
-        <select className="border rounded px-3 py-2" value={dept}
-                onChange={(e) => { setPage(1); setDept(e.target.value); }}>
-          {DEPARTMENTS.map((v) => <option key={v || "all"} value={v}>{v || "All departments"}</option>)}
+
+        <select
+          className="border rounded px-3 py-2"
+          value={dept}
+          onChange={(e) => { setPage(1); setDept(e.target.value); }}
+        >
+          {DEPARTMENTS.map((v) => (
+            <option key={v || "all"} value={v}>
+              {v || "All departments"}
+            </option>
+          ))}
         </select>
-        <select className="border rounded px-3 py-2" value={used}
-                onChange={(e) => { setPage(1); setUsed(e.target.value); }}>
-          {USED_OPTIONS.map((o) => <option key={o.value || "all"} value={o.value}>{o.label}</option>)}
+
+        <select
+          className="border rounded px-3 py-2"
+          value={used}
+          onChange={(e) => { setPage(1); setUsed(e.target.value); }}
+        >
+          {USED_OPTIONS.map((o) => (
+            <option key={o.value || "all"} value={o.value}>
+              {o.label}
+            </option>
+          ))}
         </select>
-        <select className="border rounded px-3 py-2" value={size}
-                onChange={(e) => { setPage(1); setSize(Number(e.target.value)); }}>
-          {[10, 25, 50, 100].map((n) => <option key={n} value={n}>{n} / page</option>)}
+
+        <select
+          className="border rounded px-3 py-2"
+          value={size}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            setPage(1);
+            setSize(v);
+          }}
+        >
+          {[10, 25, 50, 100, 0].map((n) => (
+            <option key={n} value={n}>
+              {n === 0 ? "All" : `${n} / page`}
+            </option>
+          ))}
         </select>
+
         <div className="flex items-center justify-between md:justify-end gap-2">
-          <button className="px-3 py-2 border rounded"
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page <= 1}>Prev</button>
-          <div className="text-sm">Page {page} / {Math.max(1, Math.ceil(total / size))}</div>
-          <button className="px-3 py-2 border rounded"
-                  onClick={() => setPage((p) => Math.min(Math.max(1, Math.ceil(total / size)), p + 1))}
-                  disabled={page >= Math.max(1, Math.ceil(total / size))}>Next</button>
+          <button
+            className="px-3 py-2 border rounded"
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={size === 0 || page <= 1}
+          >
+            Prev
+          </button>
+          <div className="text-sm">
+            {size === 0 ? "All" : `Page ${page} / ${totalPages}`}
+          </div>
+          <button
+            className="px-3 py-2 border rounded"
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            disabled={size === 0 || page >= totalPages}
+          >
+            Next
+          </button>
         </div>
       </div>
 
@@ -209,14 +382,18 @@ export default function BulkInventory() {
       {/* Modal */}
       {open && selected && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="fixed inset-0 bg-black/50" onClick={() => setOpen(false)} />
-          <div className="relative z-50 w-[90vw] max-w-3xl rounded-lg bg-white shadow-xl">
+          <div className="fixed inset-0 bg-black/50" onClick={onCloseModal} />
+          <div className="relative z-50 w/[90vw] max-w-3xl rounded-lg bg-white shadow-xl">
             {/* Header summary: compact row */}
             <div className="px-5 py-3 border-b">
               <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
                 <h3 className="text-base font-semibold">QR {selected.serial_no}</h3>
                 <span className="text-xs px-2 py-0.5 rounded bg-gray-100 font-mono">{selected.qr_id}</span>
-                <span className={`text-xs px-2 py-0.5 rounded ${selected.used ? "bg-green-100 text-green-800" : "bg-amber-100 text-amber-800"}`}>
+                <span
+                  className={`text-xs px-2 py-0.5 rounded ${
+                    selected.used ? "bg-green-100 text-green-800" : "bg-amber-100 text-amber-800"
+                  }`}
+                >
                   {selected.used ? "Linked" : "Not linked"}
                 </span>
               </div>
@@ -241,18 +418,19 @@ export default function BulkInventory() {
                 <div className="text-sm text-red-600">{detailErr}</div>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
-
                   <Field label="Asset Name" value={detail?.asset_name || "-"} />
                   <Field label="Category" value={detail?.category || "-"} />
                   <Field label="Location" value={detail?.location || "-"} />
                   <Field label="Assign Date" value={detail?.assign_date || "-"} />
                   <Field label="Status" value={detail?.status || "-"} />
-                  <Field label="Verified" value={detail?.verified ? "true" : (detail?.verified === false ? "false" : "-")} />
+                  <Field
+                    label="Verified"
+                    value={detail?.verified ? "true" : (detail?.verified === false ? "false" : "-")}
+                  />
                   <Field label="Verified By" value={detail?.verified_by || "-"} />
                   <Field label="Verification Date" value={detail?.verification_date || "-"} />
                   <Field label="Assigned Type" value={detail?.assigned_type || "-"} />
                   <Field label="Assigned Faculty Name" value={detail?.assigned_faculty_name || "-"} />
-                  {/* Description spans full width with clamp */}
                   <Field label="Description" value={detail?.desc || "-"} full lineClamp />
                 </div>
               )}
@@ -271,7 +449,7 @@ export default function BulkInventory() {
               >
                 Download QR
               </button>
-              <button onClick={() => setOpen(false)} className="px-3 py-2 rounded border hover:bg-gray-50 text-sm">
+              <button onClick={onCloseModal} className="px-3 py-2 rounded border hover:bg-gray-50 text-sm">
                 Close
               </button>
             </div>

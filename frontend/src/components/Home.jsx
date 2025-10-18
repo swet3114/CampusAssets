@@ -46,7 +46,7 @@ export default function Home() {
           {/* View Inventory */}
           <Link
             to="/assets"
-            className="rounded bg-white border px-5 py-2.5 hover:bg-gray-50 transition"
+            className="rounded bg-gray-700 text-white px-5 py-2.5 hover:bg-gray-800 transition"
           >
             View Inventory
           </Link>
@@ -54,7 +54,7 @@ export default function Home() {
           {/* View Bulk Inventory */}
           <Link
             to="/bulk-inventory"
-            className="rounded bg-white border px-5 py-2.5 hover:bg-gray-50 transition"
+            className="rounded bg-gray-700 text-white px-5 py-2.5 hover:bg-gray-800 transition"
           >
             View Bulk Inventory
           </Link>

@@ -44,6 +44,8 @@ qr_registry.create_index([("qr_id", ASCENDING)], unique=True)
 qr_registry.create_index([("serial_no", ASCENDING), ("institute", ASCENDING)], unique=True)
 qr_registry.create_index([("institute", ASCENDING), ("department", ASCENDING)])
 qr_registry.create_index([("created_at", DESCENDING)])
+qr_registry.create_index([("used", ASCENDING), ("created_at", DESCENDING)])
+qr_registry.create_index([("asset_id", ASCENDING)])
 
 # ---------------- Auth helpers ----------------
 EMP_RE = re.compile(r"^[A-Za-z0-9_-]{3,64}$")
@@ -367,7 +369,7 @@ def update_asset(id):
     if "verified" in data:
         update["verified"] = bool(data["verified"])
     if update.get("verified") is True and "verification_date" not in update:
-        update["verification_date"] = datetime.now(timezone.utc).isoformat()
+        update["verification_date"] = datetime.now(timezone.utc).date().isoformat()
 
     if "assigned_type" in update:
         if update["assigned_type"] not in ("individual", "general"):
@@ -465,6 +467,7 @@ def qr_bulk():
     stamp = qr_timestamp_str()
 
     results = []
+    now_ts = int(time.time())
     for seq in range(1, quantity + 1):
         attempts = 0
         doc = None
@@ -477,8 +480,10 @@ def qr_bulk():
                 "institute": inst,
                 "department": dept,
                 "ts": stamp,
-                "created_at": int(time.time()),
-                "used": False,
+                "created_at": now_ts,
+                "used": False,          # initially Unused
+                "linked_at": None,      # becomes timestamp when used turns True
+                # optional: "asset_id" absent at creation
             }
             try:
                 res = qr_registry.insert_one(candidate)
@@ -508,7 +513,7 @@ ASSET_FIELDS = [
 ]
 
 def enrich_qr_with_asset(qr_doc):
-    """If QR is linked, copy selected fields from the Asset into the outgoing QR JSON; else ensure keys exist."""
+    """If QR is linked to an Asset, copy selected fields; else ensure keys exist."""
     out = dict(qr_doc)
     if "asset_id" in qr_doc and isinstance(qr_doc.get("asset_id"), ObjectId):
         aid = qr_doc["asset_id"]
@@ -520,6 +525,9 @@ def enrich_qr_with_asset(qr_doc):
     else:
         for f in ASSET_FIELDS:
             out[f] = qr_doc.get(f, out.get(f, ""))
+
+    # Ensure used is boolean and consistent
+    out["used"] = bool(out.get("used", False))
     return out
 
 @app.route("/api/qr", methods=["GET"])
@@ -571,6 +579,16 @@ QR_EDITABLE = {
     "institute", "department", "assigned_type", "assigned_faculty_name"
 }
 
+def _has_meaningful_updates(update_dict: dict) -> bool:
+    """Considered 'data added' if any editable field is set to a non-empty/non-null value,
+    or verified flag explicitly set."""
+    for k, v in update_dict.items():
+        if k == "verified":
+            return True
+        if isinstance(v, str) and v.strip() != "":
+            return True
+    return False
+
 @app.route("/api/qr/<path:qr_id>", methods=["PATCH"])
 @require_auth
 def qr_update_fields(qr_id):
@@ -589,14 +607,22 @@ def qr_update_fields(qr_id):
     if "verifiedBy" in body and "verified_by" not in update:
         update["verified_by"] = str(body["verifiedBy"]).strip()
     if update.get("verified") is True and "verification_date" not in update:
-        update["verification_date"] = datetime.now(timezone.utc).isoformat()
+        update["verification_date"] = datetime.now(timezone.utc).date().isoformat()
 
     if not update:
         return jsonify({"error": "No editable fields supplied"}), 400
 
+    # If any data is added, mark QR as used=True to move it to Linked category
+    set_used = _has_meaningful_updates(update)
+
+    ops = {"$set": update}
+    if set_used:
+        ops["$set"]["used"] = True
+        ops["$set"]["linked_at"] = int(time.time())
+
     doc = qr_registry.find_one_and_update(
         {"qr_id": qr_id},
-        {"$set": update},
+        ops,
         return_document=ReturnDocument.AFTER
     )
     if not doc:
@@ -615,7 +641,7 @@ def qr_link_asset(qr_id, id):
         return jsonify({"error": "Invalid asset id"}), 400
     upd = qr_registry.find_one_and_update(
         {"qr_id": qr_id},
-        {"$set": {"used": True, "asset_id": oid}},
+        {"$set": {"used": True, "asset_id": oid, "linked_at": int(time.time())}},
         return_document=ReturnDocument.AFTER,
     )
     if not upd:
@@ -623,6 +649,8 @@ def qr_link_asset(qr_id, id):
     upd["_id"] = str(upd["_id"])
     enriched = enrich_qr_with_asset(upd)
     return jsonify(enriched), 200
+
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
