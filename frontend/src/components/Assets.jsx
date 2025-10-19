@@ -32,6 +32,7 @@ function fmt(v, fallback = "-") {
 
 function downloadExcel(rows, filenamePrefix = "assets_report") {
   const headers = [
+    "serial_no",                // NEW: include serial in export too
     "registration_number",
     "asset_name",
     "category",
@@ -67,8 +68,6 @@ function downloadExcel(rows, filenamePrefix = "assets_report") {
   saveAs(blob, `${filenamePrefix}_${stamp}.xlsx`);
 }
 
-
-
 export default function Assets() {
   const navigate = useNavigate();
   const [rows, setRows] = useState([]);
@@ -93,7 +92,7 @@ export default function Assets() {
     let alive = true;
     (async () => {
       try {
-        const res = await fetch("http://localhost:5000/api/assets", {
+        const res = await fetch(`${API}/api/assets`, {
           credentials: "include",
         });
         if (!res.ok) {
@@ -116,7 +115,7 @@ export default function Assets() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [navigate]);
 
   // Build dynamic option sets from data
   const options = useMemo(() => {
@@ -162,6 +161,7 @@ export default function Assets() {
           r.assigned_type,
           r.assigned_faculty_name,
           r.desc,
+          r.serial_no != null ? String(r.serial_no) : "", // allow search by serial
         ]
           .map((x) => (x || "").toString().toLowerCase())
           .some((s) => s.includes(q));
@@ -178,16 +178,43 @@ export default function Assets() {
     });
   }, [sorted, filter]);
 
+  // Download QR that includes serial text below the code and in filename
   const onDownloadQr = async (asset) => {
     try {
-      const content = asset.registration_number;
+      const content = asset.registration_number || ""; // encode what you scan
       const dataUrl = await generateQrPng(content, 600);
+
+      // Draw serial text below QR
+      const img = new Image();
+      img.src = dataUrl;
+      await new Promise((res) => {
+        img.onload = res;
+      });
+
+      const padding = 16;
+      const textH = 34;
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width + padding * 2;
+      canvas.height = img.height + padding * 2 + textH;
+      const ctx = canvas.getContext("2d");
+
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, padding, padding);
+
+      ctx.fillStyle = "#111";
+      ctx.font = "600 20px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      const serial = asset.serial_no != null ? String(asset.serial_no) : "-";
+      const label = `Serial No: ${serial}`;
+      const w = ctx.measureText(label).width;
+      ctx.fillText(label, (canvas.width - w) / 2, img.height + padding + 24);
+
       const a = document.createElement("a");
-      a.href = dataUrl;
+      a.href = canvas.toDataURL("image/png");
       const safeName = (asset.asset_name || "ASSET")
         .replace(/[^A-Za-z0-9_-]+/g, "_")
         .slice(0, 40) || "ASSET";
-      a.download = `${safeName}_${(asset.registration_number || "REG").replace(/[^\w-]+/g, "_")}.png`;
+      a.download = `${safeName}_${serial}_${(asset.registration_number || "REG").replace(/[^\w-]+/g, "_")}.png`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -224,7 +251,17 @@ export default function Assets() {
             <button
               type="button"
               onClick={() => {
-                const prefix = filter.q || filter.status || filter.category || filter.assigned_type || filter.institute || filter.department || filter.asset_name || filter.location ? "assets_report_filtered" : "assets_report_all";
+                const prefix =
+                  filter.q ||
+                  filter.status ||
+                  filter.category ||
+                  filter.assigned_type ||
+                  filter.institute ||
+                  filter.department ||
+                  filter.asset_name ||
+                  filter.location
+                    ? "assets_report_filtered"
+                    : "assets_report_all";
                 downloadExcel(filtered.length ? filtered : rows, prefix);
               }}
               className="inline-flex items-center rounded bg-emerald-600 text-white px-3 py-1.5 text-sm hover:bg-emerald-700"
@@ -321,6 +358,7 @@ export default function Assets() {
           <table className="min-w-full text-left text-sm">
             <thead>
               <tr className="border-b bg-gray-50">
+                <th className="px-3 py-2">Serial No</th>{/* NEW */}
                 <th className="px-3 py-2">Asset Name</th>
                 <th className="px-3 py-2">Location</th>
                 <th className="px-3 py-2">Status</th>
@@ -331,6 +369,7 @@ export default function Assets() {
             <tbody>
               {filtered.map((a) => (
                 <tr key={a._id} className="border-b hover:bg-gray-50">
+                  <td className="px-3 py-2">{fmt(a.serial_no)}</td>{/* NEW */}
                   <td className="px-3 py-2">{fmt(a.asset_name)}</td>
                   <td className="px-3 py-2">{fmt(a.location)}</td>
                   <td className="px-3 py-2">{fmt(a.status)}</td>
@@ -353,7 +392,7 @@ export default function Assets() {
               ))}
               {filtered.length === 0 && (
                 <tr>
-                  <td className="px-3 py-6 text-gray-500" colSpan={5}>
+                  <td className="px-3 py-6 text-gray-500" colSpan={6}>
                     No assets found. Adjust filters or add new items.
                   </td>
                 </tr>
@@ -378,6 +417,7 @@ export default function Assets() {
             </div>
 
             <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+              <Field label="Serial No" value={fmt(detail.serial_no)} />{/* NEW */}
               <Field label="Registration Number" value={fmt(detail.registration_number)} />
               <Field label="Asset Name" value={fmt(detail.asset_name)} />
               <Field label="Category" value={fmt(detail.category)} />
@@ -424,171 +464,3 @@ function Field({ label, value }) {
     </div>
   );
 }
-
-
-
-
-
-// // src/pages/Assets.jsx
-// import { useEffect, useMemo, useState } from "react";
-
-// // Lightweight client-side QR generator (no extra build tools required)
-// async function generateQrPng(text, size = 256) {
-
-//   const QR = await import("qrcode"); // npm install qrcode
-//   return await QR.toDataURL(text, {
-//     errorCorrectionLevel: "M",
-//     width: size,
-//     margin: 1,
-//     color: { dark: "#000000", light: "#FFFFFFFF" },
-//   });
-// }
-
-// export default function Assets() {
-//   const [assets, setAssets] = useState([]);
-//   const [loading, setLoading] = useState(true);
-//   const [err, setErr] = useState(null);
-//   const API = "http://localhost:5000"; // adjust if needed
-
-//   useEffect(() => {
-//     let alive = true;
-//     (async () => {
-//       try {
-//         const res = await fetch(`${API}/api/assets`);
-//         const data = await res.json();
-//         if (!res.ok) throw new Error(data.error || "Failed to fetch assets");
-//         if (alive) {
-//           setAssets(Array.isArray(data) ? data : []);
-//           setLoading(false);
-//         }
-//       } catch (e) {
-//         if (alive) {
-//           setErr(e.message || "Network error");
-//           setLoading(false);
-//         }
-//       }
-//     })();
-//     return () => {
-//       alive = false;
-//     };
-//   }, [API]);
-
-//   // Sort newest first by Mongo ObjectId timestamp if available; fallback to qr_id/time-embedded id
-//   const sorted = useMemo(() => {
-//     const copy = [...assets];
-//     // Prefer _id timestamp (Mongo ObjectId) if present
-//     copy.sort((a, b) => {
-//       const ida = a._id || "";
-//       const idb = b._id || "";
-//       // Mongo ObjectId’s first 8 hex chars encode seconds since epoch
-//       const ta = /^[0-9a-fA-F]{24}$/.test(ida) ? parseInt(ida.slice(0, 8), 16) : 0;
-//       const tb = /^[0-9a-fA-F]{24}$/.test(idb) ? parseInt(idb.slice(0, 8), 16) : 0;
-//       if (tb !== ta) return tb - ta;
-//       // tie-breaker: fallback to string compare of qr_id desc to keep newest-looking first
-//       return (b.qr_id || "").localeCompare(a.qr_id || "");
-//     });
-//     return copy;
-//   }, [assets]);
-
-//   const onDownloadQr = async (asset) => {
-//     try {
-//       const content = asset.qr_id; // encode qr_id; or encode a deep link like https://yourapp/scan?qr=qr_id
-//       const dataUrl = await generateQrPng(content, 512);
-//       const a = document.createElement("a");
-//       a.href = dataUrl;
-//       const safeName =
-//         (asset.product_name || "ASSET").replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 40) ||
-//         "ASSET";
-//       a.download = `${safeName}_${asset.qr_id || "QR"}.png`;
-//       document.body.appendChild(a);
-//       a.click();
-//       a.remove();
-//     } catch (e) {
-//       alert("Failed to generate QR image");
-//     }
-//   };
-
-//   if (loading) {
-//     return (
-//       <div className="max-w-6xl mx-auto p-6">
-//         <p className="text-gray-600">Loading assets…</p>
-//       </div>
-//     );
-//   }
-
-//   if (err) {
-//     return (
-//       <div className="max-w-6xl mx-auto p-6">
-//         <p className="text-red-600">{err}</p>
-//       </div>
-//     );
-//   }
-
-//   return (
-//     <div className="max-w-6xl mx-auto p-6 bg-white rounded shadow">
-//       <div className="flex items-center justify-between mb-4">
-//         <h2 className="text-xl font-semibold">Assets (Newest First)</h2>
-//         <span className="text-sm text-gray-500">{sorted.length} total</span>
-//       </div>
-
-//       <div className="overflow-x-auto">
-//         <table className="min-w-full text-left text-sm">
-//           <thead>
-//             <tr className="border-b bg-gray-50">
-//               <th className="px-3 py-2">Product</th>
-//               <th className="px-3 py-2">Location</th>
-//               <th className="px-3 py-2">Description</th>
-//               <th className="px-3 py-2">QR ID</th>
-//               <th className="px-3 py-2">Actions</th>
-//             </tr>
-//           </thead>
-//           <tbody>
-//             {sorted.map((a) => (
-//               <tr key={a._id} className="border-b hover:bg-gray-50">
-//                 <td className="px-3 py-2 font-medium">{a.product_name}</td>
-//                 <td className="px-3 py-2">{a.location}</td>
-//                 <td className="px-3 py-2 max-w-[28rem] truncate" title={a.desc}>
-//                   {a.desc}
-//                 </td>
-//                 <td className="px-3 py-2 font-mono text-xs">{a.qr_id}</td>
-//                 <td className="px-3 py-2">
-//                   <button
-//                     onClick={() => onDownloadQr(a)}
-//                     className="inline-flex items-center rounded bg-indigo-600 text-white px-3 py-1.5 text-sm hover:bg-indigo-700"
-//                   >
-//                     Download QR
-//                   </button>
-//                 </td>
-//               </tr>
-//             ))}
-//             {sorted.length === 0 && (
-//               <tr>
-//                 <td className="px-3 py-6 text-gray-500" colSpan={5}>
-//                   No assets found. Add one from “Add” page.
-//                 </td>
-//               </tr>
-//             )}
-//           </tbody>
-//         </table>
-//       </div>
-//     </div>
-//   );
-// }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

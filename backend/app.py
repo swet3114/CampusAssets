@@ -38,6 +38,13 @@ qr_registry = db[QR_COLLECTION]
 # Indexes (idempotent)
 users.create_index("emp_id", unique=True)
 # assets.create_index("registration_number", unique=True)
+# NEW: helpful index to sort by serial or ensure uniqueness if desired
+# Replace this:
+# assets.create_index([("serial_no", ASCENDING)], name="serial_no_idx")
+
+# With this:
+assets.create_index([("serial_no", ASCENDING)])
+
 
 # QR registry indexes
 qr_registry.create_index([("qr_id", ASCENDING)], unique=True)
@@ -206,7 +213,7 @@ def auth_me():
         return jsonify({"error": err}), 401
     return jsonify(user), 200
 
-# ---------------- Assets (existing flow) ----------------
+# ---------------- Assets helpers ----------------
 SAFE_TOKEN_RE = re.compile(r"[^A-Za-z0-9_-]+")
 DATE_FMT_DATE = "%Y-%m-%d"
 REG_RE = re.compile(r"^[A-Za-z0-9_-]+/\d{14}/\d{5}$")
@@ -223,6 +230,20 @@ def reg_prefix_from_asset(asset_name: str) -> str:
 def reg_with_seq(prefix: str, idx: int) -> str:
     return f"{prefix}/{idx:05d}"
 
+# NEW: Assets serial number generator (global sequential 1..N)
+def next_asset_serial() -> int:
+    """
+    Returns the next integer serial_no for the Assets collection.
+    Starts at 1 if none exist.
+    """
+    cur = assets.find({}, {"serial_no": 1}).sort([("serial_no", DESCENDING)]).limit(1)
+    try:
+        last = list(cur)[0].get("serial_no")
+        return int(last) + 1
+    except Exception:
+        return 1
+
+# ---------------- Assets (create/list/update) ----------------
 @app.route("/api/assets/bulk", methods=["POST"])
 @require_role("Super_Admin", "Admin")
 def create_assets_bulk():
@@ -275,9 +296,13 @@ def create_assets_bulk():
             pass
 
     prefix = reg_prefix_from_asset(asset_name)
+
+    # Allocate serial numbers up-front to avoid race on per-insert
+    start_serial = next_asset_serial()
     docs = []
     for i in range(1, quantity + 1):
         docs.append({
+            "serial_no": start_serial + (i - 1),  # NEW: assign sequential serials
             "registration_number": reg_with_seq(prefix, i),
             "asset_name": asset_name,
             "category": category,
@@ -297,6 +322,7 @@ def create_assets_bulk():
     try:
         res = assets.insert_many(docs, ordered=True)
     except Exception:
+        # Re-generate prefix and registration_numbers to avoid dup conflicts
         prefix = reg_prefix_from_asset(asset_name)
         for i in range(1, quantity + 1):
             docs[i - 1]["registration_number"] = reg_with_seq(prefix, i)
@@ -307,6 +333,71 @@ def create_assets_bulk():
         docs[j]["_id"] = _id
 
     return jsonify({"count": len(docs), "items": docs}), 201
+
+# NEW: Single asset create with serial_no
+@app.route("/api/assets", methods=["POST"])
+@require_role("Super_Admin", "Admin")
+def create_asset_single():
+    data = request.get_json(silent=True) or {}
+
+    asset_name = (data.get("asset_name") or "").strip()
+    category = (data.get("category") or "").strip()
+    location = (data.get("location") or "").strip()
+    assign_date = (data.get("assign_date") or "").strip()
+    status = (data.get("status") or "").strip()
+
+    desc = (data.get("desc") or "").strip()
+    verification_date = (data.get("verification_date") or "").strip()
+    verified = bool(data.get("verified", False))
+    verified_by = (data.get("verified_by") or "").strip()
+
+    institute = (data.get("institute") or "").strip()
+    department = (data.get("department") or "").strip()
+    assigned_type = (data.get("assigned_type") or "general").strip().lower()
+    assigned_faculty_name = (data.get("assigned_faculty_name") or "").strip()
+
+    missing = []
+    if not asset_name: missing.append("asset_name")
+    if not category: missing.append("category")
+    if not location: missing.append("location")
+    if not status: missing.append("status")
+    if assigned_type not in ("individual", "general"):
+        return jsonify({"error": "assigned_type must be 'individual' or 'general'"}), 400
+    if assigned_type == "individual" and not assigned_faculty_name:
+        missing.append("assigned_faculty_name")
+    if missing:
+        return jsonify({"error": f"Missing or empty field(s): {', '.join(missing)}"}), 400
+
+    if assign_date:
+        try:
+            _ = datetime.strptime(assign_date, DATE_FMT_DATE)
+        except Exception:
+            pass
+
+    prefix = reg_prefix_from_asset(asset_name)
+    serial_no = next_asset_serial()  # NEW: assign next serial
+    doc = {
+        "serial_no": serial_no,                # NEW
+        "registration_number": reg_with_seq(prefix, 1),
+        "asset_name": asset_name,
+        "category": category,
+        "location": location,
+        "assign_date": assign_date,
+        "status": status,
+        "desc": desc,
+        "verification_date": verification_date or "",
+        "verified": bool(verified),
+        "verified_by": verified_by,
+        "institute": institute,
+        "department": department,
+        "assigned_type": assigned_type,
+        "assigned_faculty_name": assigned_faculty_name if assigned_type == "individual" else "",
+        "created_at": int(time.time()),
+    }
+
+    res = assets.insert_one(doc)
+    doc["_id"] = str(res.inserted_id)
+    return jsonify(doc), 201
 
 @app.route("/api/assets", methods=["GET"])
 @require_auth
@@ -413,7 +504,7 @@ def update_profile():
     users.update_one({"_id": ObjectId(user["_id"])}, {"$set": {"name": name}})
     return jsonify({"name": name}), 200
 
-# ---------------- Bulk QR Registry (new) ----------------
+# ---------------- Bulk QR Registry (existing) ----------------
 QR_TS_FMT = "%d%m%Y%H%M%S"  # ddmmyyyyHHMMSS
 
 def qr_timestamp_str(dt=None) -> str:
@@ -526,7 +617,6 @@ def enrich_qr_with_asset(qr_doc):
         for f in ASSET_FIELDS:
             out[f] = qr_doc.get(f, out.get(f, ""))
 
-    # Ensure used is boolean and consistent
     out["used"] = bool(out.get("used", False))
     return out
 
@@ -572,7 +662,7 @@ def qr_get_by_id(qr_id):
     enriched = enrich_qr_with_asset(doc)
     return jsonify(enriched), 200
 
-# NEW: editable fields for bulk QR scan-to-fill
+# Editable fields for bulk QR scan-to-fill
 QR_EDITABLE = {
     "asset_name", "category", "location", "assign_date", "status",
     "desc", "verification_date", "verified", "verified_by",
@@ -580,8 +670,6 @@ QR_EDITABLE = {
 }
 
 def _has_meaningful_updates(update_dict: dict) -> bool:
-    """Considered 'data added' if any editable field is set to a non-empty/non-null value,
-    or verified flag explicitly set."""
     for k, v in update_dict.items():
         if k == "verified":
             return True
@@ -603,7 +691,6 @@ def qr_update_fields(qr_id):
         else:
             update[k] = ("" if v is None else str(v).strip())
 
-    # Accept camelCase alias and auto-stamp verification_date when verifying
     if "verifiedBy" in body and "verified_by" not in update:
         update["verified_by"] = str(body["verifiedBy"]).strip()
     if update.get("verified") is True and "verification_date" not in update:
@@ -612,7 +699,6 @@ def qr_update_fields(qr_id):
     if not update:
         return jsonify({"error": "No editable fields supplied"}), 400
 
-    # If any data is added, mark QR as used=True to move it to Linked category
     set_used = _has_meaningful_updates(update)
 
     ops = {"$set": update}
@@ -649,8 +735,6 @@ def qr_link_asset(qr_id, id):
     upd["_id"] = str(upd["_id"])
     enriched = enrich_qr_with_asset(upd)
     return jsonify(enriched), 200
-
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
