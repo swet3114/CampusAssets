@@ -32,7 +32,7 @@ function fmt(v, fallback = "-") {
 
 function downloadExcel(rows, filenamePrefix = "assets_report") {
   const headers = [
-    "serial_no",                // NEW: include serial in export too
+    "serial_no",
     "registration_number",
     "asset_name",
     "category",
@@ -161,7 +161,7 @@ export default function Assets() {
           r.assigned_type,
           r.assigned_faculty_name,
           r.desc,
-          r.serial_no != null ? String(r.serial_no) : "", // allow search by serial
+          r.serial_no != null ? String(r.serial_no) : "",
         ]
           .map((x) => (x || "").toString().toLowerCase())
           .some((s) => s.includes(q));
@@ -181,7 +181,7 @@ export default function Assets() {
   // Download QR that includes serial text below the code and in filename
   const onDownloadQr = async (asset) => {
     try {
-      const content = asset.registration_number || ""; // encode what you scan
+      const content = asset.registration_number || "";
       const dataUrl = await generateQrPng(content, 600);
 
       // Draw serial text below QR
@@ -220,6 +220,32 @@ export default function Assets() {
       a.remove();
     } catch {
       alert("Failed to generate QR image");
+    }
+  };
+
+  // Delete by serial number (purges asset + all its QR rows)
+  const onDeleteBySerial = async (asset) => {
+    try {
+      if (asset.serial_no == null) {
+        alert("This asset has no serial number.");
+        return;
+      }
+      if (!window.confirm(`Delete asset with Serial No ${asset.serial_no}? This cannot be undone.`)) return;
+
+      const resp = await fetch(
+        `${API}/api/assets/by-serial/${encodeURIComponent(asset.serial_no)}`,
+        { method: "DELETE", credentials: "include" }
+      );
+      if (!resp.ok) {
+        const ej = await resp.json().catch(() => ({}));
+        alert(ej.error || "Failed to delete.");
+        return;
+      }
+
+      setRows((prev) => prev.filter((x) => x._id !== asset._id));
+      if (detail && detail._id === asset._id) setDetail(null);
+    } catch {
+      alert("Delete failed due to a network error.");
     }
   };
 
@@ -355,38 +381,47 @@ export default function Assets() {
 
         {/* Table */}
         <div className="overflow-x-auto">
-          <table className="min-w-full text-left text-sm">
+          <table className="min-w-full text-sm">
             <thead>
               <tr className="border-b bg-gray-50">
-                <th className="px-3 py-2">Serial No</th>{/* NEW */}
+                <th className="px-3 py-2">Serial No</th>
                 <th className="px-3 py-2">Asset Name</th>
                 <th className="px-3 py-2">Location</th>
                 <th className="px-3 py-2">Status</th>
                 <th className="px-3 py-2">Assign Date</th>
-                <th className="px-3 py-2">Actions</th>
+                <th className="px-3 py-2 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               {filtered.map((a) => (
                 <tr key={a._id} className="border-b hover:bg-gray-50">
-                  <td className="px-3 py-2">{fmt(a.serial_no)}</td>{/* NEW */}
+                  <td className="px-3 py-2">{fmt(a.serial_no)}</td>
                   <td className="px-3 py-2">{fmt(a.asset_name)}</td>
                   <td className="px-3 py-2">{fmt(a.location)}</td>
                   <td className="px-3 py-2">{fmt(a.status)}</td>
-                  <td className="px-3 py-2">{fmt(a.assign_date)}</td>
-                  <td className="px-3 py-2 space-x-2">
-                    <button
-                      onClick={() => onDownloadQr(a)}
-                      className="inline-flex items-center rounded bg-indigo-600 text-white px-3 py-1.5 hover:bg-indigo-700"
-                    >
-                      Download QR
-                    </button>
-                    <button
-                      onClick={() => setDetail(a)}
-                      className="inline-flex items-center rounded bg-gray-100 px-3 py-1.5 hover:bg-gray-200"
-                    >
-                      More details
-                    </button>
+                  <td className="px-3 py-2 whitespace-nowrap">{fmt(a.assign_date)}</td>
+                  <td className="px-3 py-2 text-right">
+                    <div className="inline-flex gap-2">
+                      <button
+                        onClick={() => onDownloadQr(a)}
+                        className="px-3 py-1.5 text-sm rounded bg-indigo-600 text-white hover:bg-indigo-700"
+                      >
+                        Download QR
+                      </button>
+                      <button
+                        onClick={() => setDetail(a)}
+                        className="px-3 py-1.5 text-sm rounded bg-gray-100 hover:bg-gray-200"
+                      >
+                        More details
+                      </button>
+                      <button
+                        onClick={() => onDeleteBySerial(a)}
+                        className="px-3 py-1.5 text-sm rounded bg-red-700 text-white hover:bg-red-800"
+                        title="Delete asset by serial (delete asset + all linked QRs)"
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -417,7 +452,7 @@ export default function Assets() {
             </div>
 
             <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-              <Field label="Serial No" value={fmt(detail.serial_no)} />{/* NEW */}
+              <Field label="Serial No" value={fmt(detail.serial_no)} />
               <Field label="Registration Number" value={fmt(detail.registration_number)} />
               <Field label="Asset Name" value={fmt(detail.asset_name)} />
               <Field label="Category" value={fmt(detail.category)} />

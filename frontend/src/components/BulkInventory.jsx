@@ -170,7 +170,7 @@ export default function BulkInventory() {
 
       ctx.fillStyle = "#111";
       ctx.font = "600 20px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial";
-      const text = `Serial: ${row.serial_no}`;
+      const text = `Serial No: ${row.serial_no}`;
       const w = ctx.measureText(text).width;
       ctx.fillText(text, (canvas.width - w) / 2, img.height + padding + 24);
 
@@ -213,6 +213,35 @@ export default function BulkInventory() {
     } else {
       // Not linked or no asset_id yet
       setDetail(row);
+    }
+  };
+
+  // Delete by QR: remove asset (if linked) + this QR row
+  const onDeleteByQr = async (row) => {
+    try {
+      if (!window.confirm("Delete this asset and its QR permanently?")) return;
+      const resp = await fetch(`${API}/api/qr/${encodeURIComponent(row.qr_id)}/delete-asset`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!resp.ok) {
+        const ej = await resp.json().catch(() => ({}));
+        alert(ej.error || "Failed to delete.");
+        return;
+      }
+      // remove from current page
+      setItems((prev) => prev.filter((x) => x._id !== row._id));
+      setTotal((t) => Math.max(0, t - 1));
+      // if modal open on same row, close it
+      if (open && selected && selected._id === row._id) {
+        setOpen(false);
+        setSelected(null);
+        setDetail(null);
+        setDetailErr("");
+        setDetailLoading(false);
+      }
+    } catch {
+      alert("Delete failed due to a network error.");
     }
   };
 
@@ -370,6 +399,13 @@ export default function BulkInventory() {
                       >
                         View details
                       </button>
+                      <button
+                        onClick={() => onDeleteByQr(r)}
+                        className="px-3 py-1.5 rounded bg-rose-600 text-white hover:bg-rose-700"
+                        title="Delete asset and this QR"
+                      >
+                        Delete
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -448,6 +484,13 @@ export default function BulkInventory() {
                 className="px-3 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700 text-sm"
               >
                 Download QR
+              </button>
+              <button
+                onClick={() => onDeleteByQr(selected)}
+                className="px-3 py-2 rounded bg-rose-600 text-white hover:bg-rose-700 text-sm"
+                title="Delete asset and this QR"
+              >
+                Delete
               </button>
               <button onClick={onCloseModal} className="px-3 py-2 rounded border hover:bg-gray-50 text-sm">
                 Close

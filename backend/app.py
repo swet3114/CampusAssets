@@ -23,9 +23,9 @@ CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": ALLOWED_O
 # --- Mongo / Env ---
 MONGO_URL = os.getenv("MONGO_URL")
 DB_NAME = os.getenv("DB_NAME", "Dataset")
-ASSETS_COLLECTION = os.getenv("ASSETS_COLLECTION", "Assets")
+ASSETS_COLLECTION = os.getenv("ASSETS_COLLECTION", "Assets")          # single+bulk assets live here
 USER_COLLECTION = os.getenv("USER_COLLECTION", "Users")
-QR_COLLECTION = os.getenv("QR_COLLECTION", "QrRegistry")
+QR_COLLECTION = os.getenv("QR_COLLECTION", "QrRegistry")              # QR registry is separate
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 SIGNUP_SECRET = os.getenv("SECRET_KEY", "")
 
@@ -38,13 +38,7 @@ qr_registry = db[QR_COLLECTION]
 # Indexes (idempotent)
 users.create_index("emp_id", unique=True)
 # assets.create_index("registration_number", unique=True)
-# NEW: helpful index to sort by serial or ensure uniqueness if desired
-# Replace this:
-# assets.create_index([("serial_no", ASCENDING)], name="serial_no_idx")
-
-# With this:
-assets.create_index([("serial_no", ASCENDING)])
-
+assets.create_index([("serial_no", ASCENDING)])  # idempotent (default name serial_no_1)
 
 # QR registry indexes
 qr_registry.create_index([("qr_id", ASCENDING)], unique=True)
@@ -230,12 +224,8 @@ def reg_prefix_from_asset(asset_name: str) -> str:
 def reg_with_seq(prefix: str, idx: int) -> str:
     return f"{prefix}/{idx:05d}"
 
-# NEW: Assets serial number generator (global sequential 1..N)
+# Assets serial number generator (global sequential 1..N)
 def next_asset_serial() -> int:
-    """
-    Returns the next integer serial_no for the Assets collection.
-    Starts at 1 if none exist.
-    """
     cur = assets.find({}, {"serial_no": 1}).sort([("serial_no", DESCENDING)]).limit(1)
     try:
         last = list(cur)[0].get("serial_no")
@@ -302,7 +292,7 @@ def create_assets_bulk():
     docs = []
     for i in range(1, quantity + 1):
         docs.append({
-            "serial_no": start_serial + (i - 1),  # NEW: assign sequential serials
+            "serial_no": start_serial + (i - 1),
             "registration_number": reg_with_seq(prefix, i),
             "asset_name": asset_name,
             "category": category,
@@ -317,6 +307,7 @@ def create_assets_bulk():
             "department": department,
             "assigned_type": assigned_type,
             "assigned_faculty_name": assigned_faculty_name if assigned_type == "individual" else "",
+            "created_at": int(time.time()),
         })
 
     try:
@@ -334,7 +325,7 @@ def create_assets_bulk():
 
     return jsonify({"count": len(docs), "items": docs}), 201
 
-# NEW: Single asset create with serial_no
+# Single asset create with serial_no
 @app.route("/api/assets", methods=["POST"])
 @require_role("Super_Admin", "Admin")
 def create_asset_single():
@@ -375,9 +366,9 @@ def create_asset_single():
             pass
 
     prefix = reg_prefix_from_asset(asset_name)
-    serial_no = next_asset_serial()  # NEW: assign next serial
+    serial_no = next_asset_serial()
     doc = {
-        "serial_no": serial_no,                # NEW
+        "serial_no": serial_no,
         "registration_number": reg_with_seq(prefix, 1),
         "asset_name": asset_name,
         "category": category,
@@ -454,7 +445,6 @@ def update_asset(id):
             else:
                 update[f] = str(data[f]).strip()
 
-    # Alias and auto-stamp for verification fields
     if "verifiedBy" in data and "verified_by" not in update:
         update["verified_by"] = str(data["verifiedBy"]).strip()
     if "verified" in data:
@@ -572,9 +562,8 @@ def qr_bulk():
                 "department": dept,
                 "ts": stamp,
                 "created_at": now_ts,
-                "used": False,          # initially Unused
-                "linked_at": None,      # becomes timestamp when used turns True
-                # optional: "asset_id" absent at creation
+                "used": False,
+                "linked_at": None,
             }
             try:
                 res = qr_registry.insert_one(candidate)
@@ -604,7 +593,6 @@ ASSET_FIELDS = [
 ]
 
 def enrich_qr_with_asset(qr_doc):
-    """If QR is linked to an Asset, copy selected fields; else ensure keys exist."""
     out = dict(qr_doc)
     if "asset_id" in qr_doc and isinstance(qr_doc.get("asset_id"), ObjectId):
         aid = qr_doc["asset_id"]
@@ -634,6 +622,14 @@ def qr_list():
         q["department"] = dept
     if used in ("true", "false"):
         q["used"] = (used == "true")
+
+    # Optional fast lookup by asset_id if provided
+    aid = request.args.get("asset_id")
+    if aid:
+        try:
+            q["asset_id"] = ObjectId(aid)
+        except Exception:
+            return jsonify({"error": "Invalid asset_id"}), 400
 
     try:
         page = max(1, int(request.args.get("page", 1)))
@@ -735,6 +731,52 @@ def qr_link_asset(qr_id, id):
     upd["_id"] = str(upd["_id"])
     enriched = enrich_qr_with_asset(upd)
     return jsonify(enriched), 200
+
+# --------- DELETE by QR ID (hard delete: asset + QR) ----------
+@app.route("/api/qr/<path:qr_id>/delete-asset", methods=["DELETE"])
+@require_role("Super_Admin", "Admin")
+def delete_asset_by_qrid(qr_id):
+    qr_doc = qr_registry.find_one({"qr_id": qr_id})
+    if not qr_doc:
+        return jsonify({"error": "QR not found"}), 404
+
+    deleted_asset = 0
+    aid = qr_doc.get("asset_id")
+    if isinstance(aid, ObjectId):
+        res = assets.delete_one({"_id": aid})
+        deleted_asset = res.deleted_count
+
+    res_qr = qr_registry.delete_one({"_id": qr_doc["_id"]})
+    return jsonify({"deleted_asset": int(deleted_asset), "deleted_qr": int(res_qr.deleted_count)}), 200
+
+# Optional: delete only QR row, keep asset
+@app.route("/api/qr/by-id/<path:qr_id>", methods=["DELETE"])
+@require_role("Super_Admin", "Admin")
+def delete_qr_only(qr_id):
+    res = qr_registry.delete_one({"qr_id": qr_id})
+    if res.deleted_count == 0:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({"deleted_qr": 1}), 200
+
+# --------- DELETE Asset by Serial (hard delete: asset + all linked QRs) ----------
+@app.route("/api/assets/by-serial/<int:serial_no>", methods=["DELETE"])
+@require_role("Super_Admin", "Admin")
+def delete_asset_by_serial(serial_no):
+    # Find asset by serial_no
+    asset_doc = assets.find_one({"serial_no": int(serial_no)}, {"_id": 1})
+    if not asset_doc:
+        return jsonify({"error": "Asset not found"}), 404
+    aid = asset_doc["_id"]
+
+    # Delete asset
+    res_a = assets.delete_one({"_id": aid})
+    if res_a.deleted_count == 0:
+        return jsonify({"error": "Asset delete failed"}), 500
+
+    # Delete all QR rows linked to this asset (complete purge)
+    res_q = qr_registry.delete_many({"asset_id": aid})
+
+    return jsonify({"deleted_asset": 1, "deleted_qr": int(res_q.deleted_count)}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
