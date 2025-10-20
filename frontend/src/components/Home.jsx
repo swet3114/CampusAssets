@@ -1,7 +1,22 @@
 // src/pages/Home.jsx
 import { Link } from "react-router-dom";
 
+function getCurrentRole() {
+  // Adjust this to your actual auth state:
+  // If you keep the user in context, import and use it instead.
+  try {
+    const raw = localStorage.getItem("currentUser");
+    if (!raw) return null;
+    const u = JSON.parse(raw);
+    return u?.role || null;
+  } catch {
+    return null;
+  }
+}
+
 export default function Home() {
+  const role = getCurrentRole(); // "Super_Admin" | "Admin" | "Faculty" | "Verifier" | null
+
   return (
     <div className="relative overflow-hidden min-h-screen bg-gradient-to-b from-indigo-50 via-white to-white">
       {/* Hero Section */}
@@ -58,6 +73,17 @@ export default function Home() {
           >
             View Bulk Inventory
           </Link>
+
+          {/* NEW: History Logs (Super Admin only) */}
+          
+          <Link
+            to="/admin/history"
+            className="rounded bg-slate-700 text-white px-5 py-2.5 hover:bg-slate-800 transition"
+            title="View system-wide audit history"
+          >
+            History Logs
+          </Link>
+          
         </div>
       </section>
 

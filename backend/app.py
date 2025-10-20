@@ -11,6 +11,8 @@ import time
 import bcrypt
 import jwt
 from functools import wraps
+import hashlib
+import uuid
 
 load_dotenv()
 
@@ -26,6 +28,7 @@ DB_NAME = os.getenv("DB_NAME", "Dataset")
 ASSETS_COLLECTION = os.getenv("ASSETS_COLLECTION", "Assets")          # single+bulk assets live here
 USER_COLLECTION = os.getenv("USER_COLLECTION", "Users")
 QR_COLLECTION = os.getenv("QR_COLLECTION", "QrRegistry")              # QR registry is separate
+AUDIT_COLLECTION = os.getenv("AUDIT_COLLECTION", "AuditLogs")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 SIGNUP_SECRET = os.getenv("SECRET_KEY", "")
 
@@ -34,13 +37,11 @@ db = client[DB_NAME]
 assets = db[ASSETS_COLLECTION]
 users = db[USER_COLLECTION]
 qr_registry = db[QR_COLLECTION]
+audit = db[AUDIT_COLLECTION]
 
 # Indexes (idempotent)
 users.create_index("emp_id", unique=True)
-# assets.create_index("registration_number", unique=True)
-assets.create_index([("serial_no", ASCENDING)])  # idempotent (default name serial_no_1)
-
-# QR registry indexes
+assets.create_index([("serial_no", ASCENDING)])
 qr_registry.create_index([("qr_id", ASCENDING)], unique=True)
 qr_registry.create_index([("serial_no", ASCENDING), ("institute", ASCENDING)], unique=True)
 qr_registry.create_index([("institute", ASCENDING), ("department", ASCENDING)])
@@ -48,7 +49,15 @@ qr_registry.create_index([("created_at", DESCENDING)])
 qr_registry.create_index([("used", ASCENDING), ("created_at", DESCENDING)])
 qr_registry.create_index([("asset_id", ASCENDING)])
 
-# ---------------- Auth helpers ----------------
+# Audit indexes
+audit.create_index([("ts", DESCENDING)])
+audit.create_index([("action", ASCENDING)])
+audit.create_index([("actor.emp_id", ASCENDING), ("ts", DESCENDING)])
+audit.create_index([("resource.id", ASCENDING), ("ts", DESCENDING)])
+audit.create_index([("resource.serial_no", ASCENDING)])
+audit.create_index([("resource.qr_id", ASCENDING)])
+
+# ---------------- Helpers: Auth ----------------
 EMP_RE = re.compile(r"^[A-Za-z0-9_-]{3,64}$")
 
 def hash_password(plain: str) -> bytes:
@@ -143,6 +152,73 @@ def clear_auth_cookie(resp):
     resp.set_cookie("auth_token", "", expires=0, path="/")
     return resp
 
+# ---------------- Helpers: Audit ----------------
+def mask_ip(ip: str) -> str:
+    try:
+        parts = (ip or "").split(".")
+        if len(parts) == 4:
+            parts[-1] = "0"
+            return ".".join(parts)
+        return ip or ""
+    except Exception:
+        return ip or ""
+
+def hash_ua(ua: str) -> str:
+    try:
+        return hashlib.sha256((ua or "").encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
+
+def get_request_context(req):
+    ip = req.headers.get("X-Forwarded-For", "").split(",")[0].strip() or req.remote_addr or ""
+    ua = req.headers.get("User-Agent", "")
+    ctx = {
+        "ip_masked": mask_ip(ip),
+        "ua_hash": hash_ua(ua),
+        "method": req.method,
+        "route": req.path,
+        "request_id": req.headers.get("X-Request-ID", str(uuid.uuid4())),
+    }
+    return ctx
+
+def audit_log(audit_col, req, user, action, resource=None, changes=None,
+              ok=True, status=200, error=None, institute=None, department=None, severity="info"):
+    try:
+        now = int(time.time())
+        doc = {
+            "ts": now,
+            "ts_iso": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
+            "actor": {
+                "user_id": (user or {}).get("_id") if isinstance(user, dict) else None,
+                "emp_id": (user or {}).get("emp_id") if isinstance(user, dict) else None,
+                "name": (user or {}).get("name") if isinstance(user, dict) else None,
+                "role": (user or {}).get("role") if isinstance(user, dict) else None,
+            },
+            "action": str(action),
+            "resource": resource or {},
+            "result": {"ok": bool(ok), "status": int(status), "error": str(error) if error else None},
+            "context": get_request_context(req),
+            "changes": changes or {},
+            "institute": institute,
+            "department": department,
+            "severity": severity,
+        }
+        # Remove None keys inside nested maps for cleanliness
+        if doc["result"]["error"] is None:
+            del doc["result"]["error"]
+        if not doc["changes"]:
+            del doc["changes"]
+        if not doc["resource"]:
+            del doc["resource"]
+        if not doc.get("institute"):
+            doc.pop("institute", None)
+        if not doc.get("department"):
+            doc.pop("department", None)
+        audit_col.insert_one(doc)
+    except Exception:
+        # Never break the main flow because of audit failures
+        pass
+
 # ---------------- Auth routes ----------------
 @app.route("/api/auth/signup", methods=["POST"])
 def auth_signup():
@@ -154,12 +230,16 @@ def auth_signup():
     secret_key = (body.get("secret_key") or "")
 
     if not emp_id or not name or not password or not role or not secret_key:
+        audit_log(audit, request, None, "auth.signup", ok=False, status=400, error="Missing required fields")
         return jsonify({"error": "Missing required fields"}), 400
     if not EMP_RE.match(emp_id):
+        audit_log(audit, request, None, "auth.signup", ok=False, status=400, error="Invalid emp_id format")
         return jsonify({"error": "emp_id must be 3-64 chars (letters, numbers, _ or -)"}), 400
     if secret_key != SIGNUP_SECRET:
+        audit_log(audit, request, None, "auth.signup", ok=False, status=403, error="Invalid secret key")
         return jsonify({"error": "Invalid secret key"}), 403
     if role not in ["Super_Admin", "Admin", "Faculty", "Verifier"]:
+        audit_log(audit, request, None, "auth.signup", ok=False, status=400, error="Invalid role")
         return jsonify({"error": "Invalid role"}), 400
 
     try:
@@ -168,12 +248,15 @@ def auth_signup():
         users.insert_one(doc)
     except Exception as e:
         if "duplicate key" in str(e).lower():
+            audit_log(audit, request, None, "auth.signup", ok=False, status=409, error="Duplicate emp_id")
             return jsonify({"error": "emp_id already exists"}), 409
+        audit_log(audit, request, None, "auth.signup", ok=False, status=500, error="Insert failed")
         return jsonify({"error": "Failed to create user"}), 500
 
     user = users.find_one({"emp_id": emp_id})
     token = jwt_issue(user)
     user_out = {"_id": str(user["_id"]), "emp_id": user["emp_id"], "name": user["name"], "role": user["role"]}
+    audit_log(audit, request, user_out, "auth.signup", ok=True, status=201)
     resp = make_response(jsonify({"user": user_out}))
     return set_auth_cookie(resp, token), 201
 
@@ -184,19 +267,25 @@ def auth_login():
     password = (body.get("password") or "")
 
     if not emp_id or not password:
+        audit_log(audit, request, None, "auth.login", ok=False, status=400, error="Missing credentials")
         return jsonify({"error": "Missing credentials"}), 400
 
     user = users.find_one({"emp_id": emp_id})
     if not user or not check_password(password, user.get("password") or b""):
+        audit_log(audit, request, None, "auth.login", ok=False, status=401, error="Invalid credentials")
         return jsonify({"error": "Invalid credentials"}), 401
 
     token = jwt_issue(user)
     user_out = {"_id": str(user["_id"]), "emp_id": user["emp_id"], "name": user["name"], "role": user.get("role", "Faculty")}
+    audit_log(audit, request, user_out, "auth.login", ok=True, status=200)
     resp = make_response(jsonify({"user": user_out}))
     return set_auth_cookie(resp, token), 200
 
 @app.route("/api/auth/logout", methods=["POST"])
 def auth_logout():
+    # user might be missing cookie; try to resolve softly
+    user, _ = current_user()
+    audit_log(audit, request, user, "auth.logout", ok=True, status=200)
     resp = make_response(jsonify({"message": "Logged out"}))
     return clear_auth_cookie(resp), 200
 
@@ -290,6 +379,7 @@ def create_assets_bulk():
     # Allocate serial numbers up-front to avoid race on per-insert
     start_serial = next_asset_serial()
     docs = []
+    now_ts = int(time.time())
     for i in range(1, quantity + 1):
         docs.append({
             "serial_no": start_serial + (i - 1),
@@ -307,7 +397,7 @@ def create_assets_bulk():
             "department": department,
             "assigned_type": assigned_type,
             "assigned_faculty_name": assigned_faculty_name if assigned_type == "individual" else "",
-            "created_at": int(time.time()),
+            "created_at": now_ts,
         })
 
     try:
@@ -322,6 +412,18 @@ def create_assets_bulk():
     inserted_ids = [str(x) for x in res.inserted_ids]
     for j, _id in enumerate(inserted_ids):
         docs[j]["_id"] = _id
+
+    # AUDIT (bulk)
+    try:
+        sample_serials = [d["serial_no"] for d in docs[:50]]
+        audit_log(
+            audit, request, request.user, "asset.bulk_create",
+            resource={"type": "Asset", "id": None},
+            changes={"after": {"count": len(docs), "sample_serial_no": sample_serials}},
+            ok=True, status=201, institute=institute, department=department
+        )
+    except Exception:
+        pass
 
     return jsonify({"count": len(docs), "items": docs}), 201
 
@@ -388,6 +490,15 @@ def create_asset_single():
 
     res = assets.insert_one(doc)
     doc["_id"] = str(res.inserted_id)
+
+    # AUDIT (single create)
+    audit_log(
+        audit, request, request.user, "asset.create",
+        resource={"type": "Asset", "id": doc["_id"], "serial_no": serial_no, "registration_number": doc["registration_number"]},
+        changes={"after": {k: doc.get(k) for k in ["serial_no","registration_number","asset_name","category","location","status","institute","department"]}},
+        ok=True, status=201, institute=institute, department=department
+    )
+
     return jsonify(doc), 201
 
 @app.route("/api/assets", methods=["GET"])
@@ -471,6 +582,8 @@ def update_asset(id):
     if not update:
         return jsonify({"error": "No fields to update"}), 400
 
+    # Load before for diff
+    before = assets.find_one({"_id": oid}) or {}
     updated = assets.find_one_and_update(
         {"_id": oid},
         {"$set": update},
@@ -478,6 +591,19 @@ def update_asset(id):
     )
     if not updated:
         return jsonify({"error": "Not found"}), 404
+
+    # Build diff
+    changed = {}
+    for k, v in update.items():
+        changed[k] = [before.get(k), updated.get(k)]
+
+    # AUDIT (update)
+    audit_log(
+        audit, request, request.user, "asset.update",
+        resource={"type": "Asset", "id": str(oid), "serial_no": before.get("serial_no"), "registration_number": before.get("registration_number")},
+        changes={"diff": changed},
+        ok=True, status=200, institute=updated.get("institute"), department=updated.get("department")
+    )
 
     updated["_id"] = str(updated["_id"])
     return jsonify(updated), 200
@@ -492,9 +618,10 @@ def update_profile():
     if not name:
         return jsonify({"error": "Name cannot be empty"}), 400
     users.update_one({"_id": ObjectId(user["_id"])}, {"$set": {"name": name}})
+    audit_log(audit, request, user, "user.profile_update", ok=True, status=200)
     return jsonify({"name": name}), 200
 
-# ---------------- Bulk QR Registry (existing) ----------------
+# ---------------- Bulk QR Registry ----------------
 QR_TS_FMT = "%d%m%Y%H%M%S"  # ddmmyyyyHHMMSS
 
 def qr_timestamp_str(dt=None) -> str:
@@ -581,6 +708,14 @@ def qr_bulk():
         if not doc:
             return jsonify({"error": "Could not allocate unique identifiers"}), 500
         results.append(doc)
+
+    # AUDIT
+    sample_qr = [r["qr_id"] for r in results[:50]]
+    audit_log(
+        audit, request, request.user, "qr.bulk_create",
+        resource={"type":"QR"}, changes={"after":{"count": len(results), "sample_qr_id": sample_qr}},
+        ok=True, status=201, institute=inst, department=dept
+    )
 
     return jsonify({"count": len(results), "items": results}), 201
 
@@ -710,6 +845,14 @@ def qr_update_fields(qr_id):
     if not doc:
         return jsonify({"error": "QR not found"}), 404
 
+    # AUDIT (qr update fields)
+    audit_log(
+        audit, request, request.user, "qr.update",
+        resource={"type":"QR", "qr_id": qr_id},
+        changes={"after": {k: update.get(k) for k in update}},
+        ok=True, status=200, institute=doc.get("institute"), department=doc.get("department")
+    )
+
     doc["_id"] = str(doc["_id"])
     enriched = enrich_qr_with_asset(doc)
     return jsonify(enriched), 200
@@ -728,6 +871,14 @@ def qr_link_asset(qr_id, id):
     )
     if not upd:
         return jsonify({"error": "QR not found"}), 404
+
+    # AUDIT
+    audit_log(
+        audit, request, request.user, "qr.link",
+        resource={"type":"QR","qr_id": qr_id, "asset_id": str(oid)},
+        ok=True, status=200, institute=upd.get("institute"), department=upd.get("department")
+    )
+
     upd["_id"] = str(upd["_id"])
     enriched = enrich_qr_with_asset(upd)
     return jsonify(enriched), 200
@@ -747,6 +898,15 @@ def delete_asset_by_qrid(qr_id):
         deleted_asset = res.deleted_count
 
     res_qr = qr_registry.delete_one({"_id": qr_doc["_id"]})
+
+    # AUDIT
+    audit_log(
+        audit, request, request.user, "qr.delete_with_asset",
+        resource={"type":"QR","qr_id": qr_id, "asset_id": str(aid) if isinstance(aid, ObjectId) else None},
+        changes={"before": {"asset_deleted": int(deleted_asset), "qr_deleted": int(res_qr.deleted_count)}},
+        ok=True, status=200, institute=qr_doc.get("institute"), department=qr_doc.get("department")
+    )
+
     return jsonify({"deleted_asset": int(deleted_asset), "deleted_qr": int(res_qr.deleted_count)}), 200
 
 # Optional: delete only QR row, keep asset
@@ -756,6 +916,12 @@ def delete_qr_only(qr_id):
     res = qr_registry.delete_one({"qr_id": qr_id})
     if res.deleted_count == 0:
         return jsonify({"error": "Not found"}), 404
+
+    audit_log(
+        audit, request, request.user, "qr.delete",
+        resource={"type":"QR","qr_id": qr_id},
+        ok=True, status=200
+    )
     return jsonify({"deleted_qr": 1}), 200
 
 # --------- DELETE Asset by Serial (hard delete: asset + all linked QRs) ----------
@@ -763,20 +929,108 @@ def delete_qr_only(qr_id):
 @require_role("Super_Admin", "Admin")
 def delete_asset_by_serial(serial_no):
     # Find asset by serial_no
-    asset_doc = assets.find_one({"serial_no": int(serial_no)}, {"_id": 1})
+    asset_doc = assets.find_one({"serial_no": int(serial_no)})
     if not asset_doc:
+        audit_log(audit, request, request.user, "asset.delete", resource={"type":"Asset","serial_no": serial_no}, ok=False, status=404, error="Asset not found")
         return jsonify({"error": "Asset not found"}), 404
     aid = asset_doc["_id"]
 
     # Delete asset
     res_a = assets.delete_one({"_id": aid})
     if res_a.deleted_count == 0:
+        audit_log(audit, request, request.user, "asset.delete", resource={"type":"Asset","id": str(aid),"serial_no": serial_no}, ok=False, status=500, error="Delete failed")
         return jsonify({"error": "Asset delete failed"}), 500
 
     # Delete all QR rows linked to this asset (complete purge)
     res_q = qr_registry.delete_many({"asset_id": aid})
 
+    # AUDIT
+    snapshot = {k: asset_doc.get(k) for k in ["serial_no","registration_number","asset_name","category","location","status","institute","department"]}
+    audit_log(
+        audit, request, request.user, "asset.delete",
+        resource={"type":"Asset","id": str(aid),"serial_no": serial_no,"registration_number": asset_doc.get("registration_number")},
+        changes={"before": snapshot, "after": {"deleted_qr_rows": int(res_q.deleted_count)}},
+        ok=True, status=200, institute=asset_doc.get("institute"), department=asset_doc.get("department")
+    )
+
     return jsonify({"deleted_asset": 1, "deleted_qr": int(res_q.deleted_count)}), 200
 
+# ---------------- Audit READ APIs (Super Admin) ----------------
+def _parse_bool(s):
+    return True if str(s).lower() == "true" else False if str(s).lower() == "false" else None
+
+@app.route("/api/audit", methods=["GET"])
+@require_role("Super_Admin",)
+def audit_list():
+    q = {}
+    # Filters
+    action = (request.args.get("action") or "").strip()
+    emp_id = (request.args.get("emp_id") or "").strip()
+    resource_type = (request.args.get("resource_type") or "").strip()
+    resource_id = (request.args.get("resource_id") or "").strip()
+    serial_no = request.args.get("serial_no")
+    qr_id = (request.args.get("qr_id") or "").strip()
+    result = (request.args.get("result") or "").strip()  # "success" or "failure"
+    try:
+        from_ts = int(request.args.get("from_ts")) if request.args.get("from_ts") else None
+        to_ts = int(request.args.get("to_ts")) if request.args.get("to_ts") else None
+    except Exception:
+        from_ts = to_ts = None
+
+    if action:
+        q["action"] = action
+    if emp_id:
+        q["actor.emp_id"] = emp_id
+    if resource_type:
+        q["resource.type"] = resource_type
+    if resource_id:
+        q["resource.id"] = resource_id
+    if serial_no is not None and serial_no != "":
+        try:
+            q["resource.serial_no"] = int(serial_no)
+        except Exception:
+            q["resource.serial_no"] = serial_no
+    if qr_id:
+        q["resource.qr_id"] = qr_id
+    if result in ("success","failure"):
+        q["result.ok"] = (result == "success")
+    if from_ts is not None or to_ts is not None:
+        q["ts"] = {}
+        if from_ts is not None:
+            q["ts"]["$gte"] = from_ts
+        if to_ts is not None:
+            q["ts"]["$lte"] = to_ts
+
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+        size = min(100, max(1, int(request.args.get("size", 25))))
+    except Exception:
+        page, size = 1, 25
+    skip = (page - 1) * size
+
+    total = audit.count_documents(q)
+    cur = audit.find(q).sort([("ts", DESCENDING)]).skip(skip).limit(size)
+
+    items = []
+    for d in cur:
+        d["_id"] = str(d["_id"])
+        items.append(d)
+
+    return jsonify({"total": total, "page": page, "size": size, "items": items}), 200
+
+@app.route("/api/audit/<id>", methods=["GET"])
+@require_role("Super_Admin",)
+def audit_get_one(id):
+    try:
+        oid = ObjectId(id)
+    except Exception:
+        return jsonify({"error": "Invalid id"}), 400
+    doc = audit.find_one({"_id": oid})
+    if not doc:
+        return jsonify({"error": "Not found"}), 404
+    doc["_id"] = str(doc["_id"])
+    return jsonify(doc), 200
+
+# ---------------- Run ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)

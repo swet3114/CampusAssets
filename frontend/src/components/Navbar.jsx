@@ -127,6 +127,7 @@ export default function Navbar() {
               >
                 View Bulk Inventory
               </NavLink>
+              
 
               <NavLink
                 to="/scan"
@@ -134,6 +135,13 @@ export default function Navbar() {
                 onClick={() => setOpen(false)}
               >
                 Scan QR
+              </NavLink>
+              <NavLink
+                to="/admin/history"
+                className={({ isActive }) => `${linkBase} ${isActive ? activeClass : ""}`}
+                onClick={() => setOpen(false)}
+              >
+                History Logs
               </NavLink>
             </div>
           </nav>
