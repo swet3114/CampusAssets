@@ -1031,6 +1031,16 @@ def audit_get_one(id):
     doc["_id"] = str(doc["_id"])
     return jsonify(doc), 200
 
+
+@app.route("/api/assets/max-serial", methods=["GET"])
+def get_max_serial():
+    # Safely get the max serial_no; default to 0 if none
+    doc = assets.find_one({"serial_no": {"$exists": True}}, sort=[("serial_no", -1)])
+    max_serial = doc["serial_no"] if doc else 0
+    return jsonify({"next_serial": max_serial + 1}), 200
+
+
+
 # ---------------- Run ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)

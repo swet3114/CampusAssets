@@ -384,12 +384,12 @@ export default function Assets() {
           <table className="min-w-full text-sm">
             <thead>
               <tr className="border-b bg-gray-50">
-                <th className="px-3 py-2">Serial No</th>
-                <th className="px-3 py-2">Asset Name</th>
-                <th className="px-3 py-2">Location</th>
-                <th className="px-3 py-2">Status</th>
-                <th className="px-3 py-2">Assign Date</th>
-                <th className="px-3 py-2 text-right">Actions</th>
+                <th className="px-3 py-2 text-left">Serial No</th>
+                <th className="px-3 py-2 text-left">Asset Name</th>
+                <th className="px-3 py-2 text-left">Location</th>
+                <th className="px-3 py-2 text-left">Status</th>
+                <th className="px-3 py-2 text-left">Assign Date</th>
+                <th className="px-3 py-2 text-center">Actions</th>
               </tr>
             </thead>
             <tbody>
