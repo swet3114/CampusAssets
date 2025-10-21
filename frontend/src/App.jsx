@@ -149,7 +149,6 @@ export default function App() {
             </Protected>
           }
         />
-
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>

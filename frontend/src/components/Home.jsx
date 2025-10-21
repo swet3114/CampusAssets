@@ -1,9 +1,7 @@
-// src/pages/Home.jsx
 import { Link } from "react-router-dom";
+import Chatbot from "../components/Chatbot";
 
 function getCurrentRole() {
-  // Adjust this to your actual auth state:
-  // If you keep the user in context, import and use it instead.
   try {
     const raw = localStorage.getItem("currentUser");
     if (!raw) return null;
@@ -21,12 +19,9 @@ export default function Home() {
     <div className="relative overflow-hidden min-h-screen bg-gradient-to-b from-indigo-50 via-white to-white">
       {/* Hero Section */}
       <section className="relative max-w-6xl mx-auto px-6 py-16 md:py-24 text-center">
-        {/* Title */}
         <h1 className="text-4xl md:text-5xl font-semibold tracking-tight text-gray-900">
           Welcome to <span className="text-indigo-600">CampusAssets</span>
         </h1>
-
-        {/* Subtitle */}
         <p className="mt-4 text-gray-600 max-w-2xl mx-auto">
           Register assets, scan and verify with QR codes, and maintain accurate
           inventory across departments efficiently.
@@ -34,47 +29,36 @@ export default function Home() {
 
         {/* Action Buttons */}
         <div className="mt-10 flex items-center justify-center gap-3 flex-wrap">
-          {/* Add Single Asset */}
           <Link
             to="/assets/new"
             className="rounded bg-indigo-600 text-white px-5 py-2.5 hover:bg-indigo-700 transition"
           >
             Add Single Asset
           </Link>
-
-          {/* Add Bulk Assets */}
           <Link
             to="/bulkasset"
             className="rounded bg-green-600 text-white px-5 py-2.5 hover:bg-green-700 transition"
           >
             Add Bulk Assets
           </Link>
-
-          {/* Scan QR */}
           <Link
             to="/scan"
             className="rounded bg-gray-900 text-white px-5 py-2.5 hover:bg-black transition"
           >
             Scan QR
           </Link>
-
-          {/* View Inventory */}
           <Link
             to="/assets"
             className="rounded bg-gray-700 text-white px-5 py-2.5 hover:bg-gray-800 transition"
           >
             View Inventory
           </Link>
-
-          {/* View Bulk Inventory */}
           <Link
             to="/bulk-inventory"
             className="rounded bg-gray-700 text-white px-5 py-2.5 hover:bg-gray-800 transition"
           >
             View Bulk Inventory
           </Link>
-
-          {/* NEW: History Logs (Super Admin only) */}
           
           <Link
             to="/admin/history"
@@ -82,7 +66,7 @@ export default function Home() {
             title="View system-wide audit history"
           >
             History Logs
-          </Link>
+            </Link>
           
         </div>
       </section>
@@ -92,8 +76,6 @@ export default function Home() {
         <h2 className="text-2xl font-semibold text-center mb-10 text-gray-800">
           Manage your Campus Assets with Ease
         </h2>
-
-        {/* Info Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <Card
             title="Add Single Asset"
@@ -109,11 +91,13 @@ export default function Home() {
           />
         </div>
       </section>
+
+      {/* Fixed-position chatbot icon and panel */}
+      <Chatbot />
     </div>
   );
 }
 
-/* Reusable Info Card Component */
 function Card({ title, body }) {
   return (
     <div className="rounded-lg border bg-white p-5 shadow-sm hover:shadow-md transition">
