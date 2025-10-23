@@ -133,7 +133,7 @@ export default function Chatbot() {
     position: "fixed",
     bottom: "24px",
     right: "24px",
-    background: "#4f46e5",
+    background: "#6366F1",
     color: "#fff",
     fontSize: "1.5rem",
     borderRadius: "50%",
@@ -201,7 +201,7 @@ export default function Chatbot() {
         title="Chat with support"
         aria-label="Chatbot"
       >
-        <span role="img" aria-label="Chatbot">💬</span>
+        <span role="img" aria-label="Chatbot">🤖</span>
       </button>
 
       {/* --- Chat Panel (role-gated) --- */}

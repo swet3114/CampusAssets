@@ -1041,6 +1041,113 @@ def get_max_serial():
 
 
 
+@app.route("/api/assets/bulk-update-by-serial", methods=["POST"])
+def bulk_update_by_serial():
+    updates = request.get_json(silent=True) or []
+    allowed_fields = [
+        "qr_id", "institute", "department", "ts", "used", "linked_at", "registration_number",
+        "asset_name", "category", "location", "assign_date", "status", "desc",
+        "verification_date", "verified", "verified_by", "assigned_type", "assigned_faculty_name"
+    ]
+    results = []
+    qr_registry = db["QrRegistry"]
+
+    for u in updates:
+        serial_no = u.get("serial_no")
+        serial_no = str(serial_no).replace('\uFEFF', '').strip() if serial_no else None
+        verified_by = (u.get("verified_by") or "").strip()
+        if not serial_no or not verified_by:
+            results.append({
+                "serial_no": serial_no,
+                "matched": 0,
+                "modified": 0,
+                "skipped": True,
+                "reason": "Missing serial_no or verified_by"
+            })
+            continue  # Skip rows without serial_no or verified_by
+
+        # Build update_fields (permitted fields except ones to overwrite)
+        update_fields = {k: u[k] for k in allowed_fields if k in u and k != "serial_no" and k != "verified_by" and k != "used"}
+
+        update_fields["used"] = True
+        update_fields["verified_by"] = verified_by
+        update_fields["verified"] = True
+        update_fields["linked_at"] = int(time.time())
+        update_fields["verification_date"] = datetime.now().strftime("%Y-%m-%d")
+        
+        # Auto-fill assign_date if missing/blank
+        assign_date = u.get("assign_date")
+        if not assign_date or str(assign_date).strip() == "":
+            assign_date = datetime.now().strftime("%Y-%m-%d")
+        update_fields["assign_date"] = assign_date
+
+        matched, modified = 0, 0
+
+        # Update in Assets collection
+        asset_result = assets.update_one(
+            {"serial_no": serial_no}, {"$set": update_fields}
+        )
+        matched += asset_result.matched_count
+        modified += asset_result.modified_count
+
+        # Also update in QrRegistry if needed:
+        qr_result = qr_registry.update_one(
+            {"serial_no": serial_no}, {"$set": update_fields}
+        )
+        matched += qr_result.matched_count
+        modified += qr_result.modified_count
+
+        results.append({
+            "serial_no": serial_no,
+            "matched": matched,
+            "modified": modified,
+            "skipped": False
+        })
+    return jsonify({"updated": results}), 200
+
+
+@app.route('/api/assets/single-import', methods=['POST'])
+def import_excel_single():
+    asset_data = request.get_json(silent=True) or {}
+    print('DEBUG: Received asset_data:', asset_data)
+
+    serial_no = asset_data.get("serial_no")
+    try:
+        serial_no = int(str(serial_no).replace('\uFEFF', '').strip()) if serial_no is not None else None
+    except ValueError:
+        serial_no = None
+    verified_by = (asset_data.get("verified_by") or "").strip()
+    print('DEBUG: serial_no:', serial_no)
+    print('DEBUG: verified_by:', verified_by)
+
+    if not serial_no or not verified_by:
+        return jsonify({"skipped": True, "reason": "Missing serial_no or verified_by"}), 200
+
+    # Standardize/auto-fill assign_date if needed
+    assign_date = asset_data.get("assign_date")
+    if not assign_date or str(assign_date).strip() == "":
+        assign_date = datetime.now().strftime("%Y-%m-%d")
+    verification_date = datetime.now().strftime("%Y-%m-%d")
+
+    # Prepare update fields, excluding keys we'll overwrite
+    allowed_fields = [
+        "registration_number", "asset_name", "category", "location", "assign_date",
+        "status", "desc", "verification_date", "verified", "verified_by",
+        "institute", "department", "assigned_type", "assigned_faculty_name"
+    ]
+    update_fields = {k: asset_data[k] for k in allowed_fields if k in asset_data and k not in ["serial_no", "verified_by"]}
+    # System-controlled fields:
+    update_fields["assign_date"] = assign_date
+    update_fields["verified_by"] = verified_by
+    update_fields["verified"] = True
+    update_fields["verification_date"] = verification_date
+
+    result = assets.update_one({"serial_no": serial_no}, {"$set": update_fields})
+    print('DEBUG: update_one matched:', result.matched_count, 'modified:', result.modified_count)
+    return jsonify({"serial_no": serial_no, "updated": bool(result.modified_count), "skipped": False}), 200
+
+
+
 # ---------------- Run ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)

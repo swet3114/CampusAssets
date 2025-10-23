@@ -1,31 +1,22 @@
-// src/pages/Scan.jsx
 import { useEffect, useRef, useState } from "react";
 import { Html5QrcodeScanner, Html5Qrcode } from "html5-qrcode";
 import { useNavigate } from "react-router-dom";
+import * as XLSX from "xlsx";
 
-const API = "http://localhost:5000"; // backend base URL
+const API = "http://localhost:5000";
 
 const STATUS_OPTIONS = ["active", "inactive", "repair", "scrape", "damage"];
 const ASSIGNED_TYPE_OPTIONS = ["general", "individual"];
-
-// Single-asset registration number format: <Asset_name>/<YYYYMMDDHHMMSS>/<NNNNN>
 const REG_RE = /^[A-Za-z0-9_-]+\/\d{14}\/\d{5}$/;
-// Bulk QR format: <INSTITUTE>/<DEPT>/<ddmmyyyyHHMMSS>/<NNNN>
 const BULK_RE = /^[A-Z]{2,20}\/[A-Z]{2,20}\/\d{14}\/\d{4}$/;
 
 export default function Scan() {
   const navigate = useNavigate();
 
-  // Mode/state: "single" (Assets collection) or "bulk" (QrRegistry doc)
   const [mode, setMode] = useState(null);
   const [scannedText, setScannedText] = useState("");
-
-  // When single
   const [asset, setAsset] = useState(null);
-
-  // When bulk
-  const [qrDoc, setQrDoc] = useState(null); // holds qr_id and any previously saved fields
-
+  const [qrDoc, setQrDoc] = useState(null);
   const [statusMsg, setStatusMsg] = useState(null);
 
   const [form, setForm] = useState({
@@ -45,12 +36,10 @@ export default function Scan() {
   });
 
   const needsFaculty = form.assigned_type === "individual";
+  const scannerRef = useRef(null);
+  const fileQrRef = useRef(null);
+  const mountedRef = useRef(false);
 
-  const scannerRef = useRef(null);   // Html5QrcodeScanner instance (UI wrapper)
-  const fileQrRef = useRef(null);    // Html5Qrcode instance for file scanning
-  const mountedRef = useRef(false);  // guard to avoid double init
-
-  // Initialize the Scanner UI exactly once
   useEffect(() => {
     if (mountedRef.current) return;
     mountedRef.current = true;
@@ -64,7 +53,7 @@ export default function Scan() {
         handleDecodedText(decodedText);
       };
 
-      const onError = () => { /* ignore per-frame errors */ };
+      const onError = () => {};
 
       scanner.render(onSuccess, onError);
       scannerRef.current = scanner;
@@ -84,7 +73,6 @@ export default function Scan() {
     };
   }, []);
 
-  // Decoded text handler shared by camera and file upload
   const handleDecodedText = async (text) => {
     setStatusMsg(null);
     setMode(null);
@@ -98,7 +86,6 @@ export default function Scan() {
       return;
     }
 
-    // Try BULK first
     if (BULK_RE.test(t)) {
       try {
         const res = await fetch(`${API}/api/qr/by-id/${encodeURIComponent(t)}`, { credentials: "include" });
@@ -111,7 +98,6 @@ export default function Scan() {
           setMode("bulk");
           setQrDoc(qr);
           setScannedText(t);
-          // Prefill form with any saved values (else keep defaults)
           setForm({
             asset_name: qr.asset_name || "",
             category: qr.category || "",
@@ -130,14 +116,12 @@ export default function Scan() {
           });
           return;
         }
-        // If bulk lookup failed (404), fall through to single pattern check below
       } catch {
         setStatusMsg({ ok: false, msg: "Network error" });
         return;
       }
     }
 
-    // Fallback: SINGLE (registration number) path
     if (!REG_RE.test(t)) {
       setStatusMsg({ ok: false, msg: "Data not found" });
       return;
@@ -202,7 +186,6 @@ export default function Scan() {
     scannerRef.current = scanner;
   };
 
-  // Scan from image file
   const onFileChange = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -239,7 +222,6 @@ export default function Scan() {
     e.preventDefault();
     setStatusMsg(null);
 
-    // Bulk path: PATCH into QrRegistry doc (verification_date will be auto-stamped server-side)
     if (mode === "bulk" && qrDoc?.qr_id) {
       try {
         const payload = {
@@ -249,7 +231,6 @@ export default function Scan() {
           assign_date: form.assign_date,
           status: form.status,
           desc: form.desc,
-          // Do not send verification_date; server will stamp when verified=true
           verified: !!form.verified,
           verified_by: form.verified_by,
           institute: form.institute,
@@ -270,7 +251,6 @@ export default function Scan() {
         } else {
           setStatusMsg({ ok: true, msg: "Saved to QR registry" });
           setQrDoc(data);
-          // Reflect server-stamped date in form if present
           setForm((f) => ({ ...f, verification_date: data.verification_date || f.verification_date }));
         }
       } catch {
@@ -279,7 +259,6 @@ export default function Scan() {
       return;
     }
 
-    // Single path: PUT into Assets (verification_date auto-stamped server-side)
     if (mode === "single" && asset?._id) {
       try {
         const payload = {
@@ -293,7 +272,6 @@ export default function Scan() {
           department: form.department,
           assigned_type: form.assigned_type,
           assigned_faculty_name: needsFaculty ? form.assigned_faculty_name : "",
-          // Explicitly send verification fields; server will add verification_date if verified=true
           verified: !!form.verified,
           verified_by: form.verified_by,
         };
@@ -318,14 +296,86 @@ export default function Scan() {
     }
   };
 
+  // --- BULK IMPORT HANDLER ---
+  const handleImportExcel = (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  setStatusMsg(null);
+
+  const reader = new FileReader();
+  reader.onload = async (evt) => {
+    try {
+      const wb = XLSX.read(evt.target.result, { type: "binary" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      let rows = XLSX.utils.sheet_to_json(ws);
+
+      // Clean up BOM and whitespace
+      rows = rows.map(row => {
+        const out = {};
+        for (const k in row) {
+          const cleanKey = String(k).replace(/^\uFEFF/, '').trim();
+          let val = row[k];
+          if (typeof val === "string") val = val.replace(/^\uFEFF/, '').trim();
+          out[cleanKey] = val;
+        }
+        return out;
+      });
+
+      // Only allow rows with non-empty "verified_by"
+      const filteredRows = rows.filter(r => (r.verified_by || "").trim());
+
+      // Decide: bulk or single import
+      if (filteredRows.length) {
+        // Bulk if ALL serial_no start with a letter
+        const isBulk = filteredRows.every(
+          r => /^[A-Za-z]/.test(String(r.serial_no || ""))
+        );
+
+        if (isBulk) {
+          // Bulk update
+          const res = await fetch(`${API}/api/assets/bulk-update-by-serial`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify(filteredRows),
+          });
+          const data = await res.json();
+          if (!res.ok) setStatusMsg({ ok: false, msg: data.error || "Bulk update failed" });
+          else setStatusMsg({ ok: true, msg: `Bulk update complete. Updated: ${data.updated?.length || 0}` });
+        } else {
+          // Single asset update: one request per row
+          let success = 0, failure = 0;
+          for (const row of filteredRows) {
+            if (/^\d+$/.test(String(row.serial_no || ""))) {
+              const res = await fetch(`${API}/api/assets/single-import`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify(row),
+              });
+              if (res.ok) success++;
+              else failure++;
+            }
+          }
+          setStatusMsg({
+            ok: failure === 0,
+            msg: `Single asset update: Updated ${success}, failed ${failure}`,
+          });
+        }
+      }
+    } catch {
+      setStatusMsg({ ok: false, msg: "Bulk/single import failed" });
+    }
+  };
+  reader.readAsBinaryString(file);
+};
+
+
   return (
     <div className="max-w-4xl mx-auto p-6 space-y-6">
       <div className="bg-white rounded shadow p-4">
         <h2 className="text-lg font-semibold mb-3">Scan QR</h2>
-
-        {/* Camera scanner UI container (managed entirely by Html5QrcodeScanner) */}
         <div id="qr-reader" className="w-full max-w-md" />
-
         <div className="mt-3 flex items-center gap-3 flex-wrap">
           <span className="text-sm text-gray-600">Scanned: {scannedText || "-"}</span>
           <button
@@ -335,30 +385,24 @@ export default function Scan() {
           >
             Scan
           </button>
-
-          {/* File upload fallback */}
           <label className="text-sm text-gray-600">
             or upload image:
             <input type="file" accept="image/*" onChange={onFileChange} className="ml-2 text-sm" />
           </label>
         </div>
-
         {statusMsg && !statusMsg.ok && (
           <div className="mt-3 rounded border border-red-200 bg-red-50 text-red-700 px-3 py-2 text-sm">
             {statusMsg.msg}
           </div>
         )}
-
-        {/* Hidden canvas container used by Html5Qrcode for file scanning */}
         <div id="qr-reader-file-canvas" style={{ display: "none" }} />
       </div>
 
       <div className="bg-white rounded shadow p-4">
         <h3 className="text-lg font-semibold mb-3">
           {mode === "bulk" ? "Bulk QR Details (QR Registry)" :
-           mode === "single" ? "Asset Details" : "Details"}
+            mode === "single" ? "Asset Details" : "Details"}
         </h3>
-
         {!(mode === "bulk" || mode === "single") ? (
           <p className="text-gray-600 text-sm">
             Scan a QR code or upload an image; bulk QRs will load editable fields from the QR registry,
@@ -377,7 +421,6 @@ export default function Scan() {
                   required
                 />
               </div>
-
               <div>
                 <label className="block text-sm mb-1">Category</label>
                 <input
@@ -388,7 +431,6 @@ export default function Scan() {
                   required
                 />
               </div>
-
               <div>
                 <label className="block text-sm mb-1">Location</label>
                 <input
@@ -399,7 +441,6 @@ export default function Scan() {
                   required
                 />
               </div>
-
               <div>
                 <label className="block text-sm mb-1">Assign Date</label>
                 <input
@@ -410,7 +451,6 @@ export default function Scan() {
                   onChange={onChange}
                 />
               </div>
-
               <div>
                 <label className="block text-sm mb-1">Status</label>
                 <select
@@ -425,7 +465,6 @@ export default function Scan() {
                   ))}
                 </select>
               </div>
-
               <div>
                 <label className="block text-sm mb-1">Institute</label>
                 <input
@@ -435,7 +474,6 @@ export default function Scan() {
                   onChange={onChange}
                 />
               </div>
-
               <div>
                 <label className="block text-sm mb-1">Department</label>
                 <input
@@ -445,7 +483,6 @@ export default function Scan() {
                   onChange={onChange}
                 />
               </div>
-
               <div>
                 <label className="block text-sm mb-1">Assigned Type</label>
                 <select
@@ -460,7 +497,6 @@ export default function Scan() {
                   ))}
                 </select>
               </div>
-
               <div className={`${needsFaculty ? "" : "opacity-60"}`}>
                 <label className="block text-sm mb-1">
                   Assigned Faculty Name {needsFaculty ? "" : "(disabled)"}
@@ -475,7 +511,6 @@ export default function Scan() {
                   required={needsFaculty}
                 />
               </div>
-
               <div className="md:col-span-2">
                 <label className="block text-sm mb-1">Description</label>
                 <textarea
@@ -486,7 +521,6 @@ export default function Scan() {
                   rows={3}
                 />
               </div>
-
               <div>
                 <label className="inline-flex items-center gap-2 text-sm">
                   <input
@@ -498,7 +532,6 @@ export default function Scan() {
                   Verified
                 </label>
               </div>
-
               <div>
                 <label className="block text-sm mb-1">Verified By</label>
                 <input
@@ -509,13 +542,11 @@ export default function Scan() {
                 />
               </div>
             </div>
-
             <div className="text-sm text-gray-600">
               {mode === "single"
                 ? <>Registration Number: {asset?.registration_number}</>
                 : <>QR ID: {qrDoc?.qr_id}</>}
             </div>
-
             <div className="flex gap-3">
               <button
                 type="submit"
@@ -533,10 +564,26 @@ export default function Scan() {
             </div>
           </form>
         )}
-
         {statusMsg && statusMsg.ok && (
           <p className="mt-3 text-sm text-green-600">{statusMsg.msg}</p>
         )}
+      </div>
+
+      {/* --- BULK IMPORT SECTION --- */}
+      <div className="bg-white rounded shadow p-4">
+        <h3 className="text-lg font-semibold mb-3">Asset Data Import</h3>
+        <p className="text-sm text-gray-600 mb-2">
+          Import an Excel file to update one or multiple assets by serial number. The file must include a <b>serial_no</b> column and a <b>verified_by</b> column. Only rows with a filled <b>verified_by</b> will be updated.
+        </p>
+        <input
+          type="file"
+          accept=".xlsx,.xls"
+          onChange={handleImportExcel}
+          className="mb-2"
+        />
+        <p className="text-xs text-gray-500">
+          Example columns: serial_no, asset_name, category, location, assign_date, status, desc, institute, department, assigned_type, assigned_faculty_name, verified_by.
+        </p>
       </div>
     </div>
   );
