@@ -1146,6 +1146,390 @@ def import_excel_single():
     print('DEBUG: update_one matched:', result.matched_count, 'modified:', result.modified_count)
     return jsonify({"serial_no": serial_no, "updated": bool(result.modified_count), "skipped": False}), 200
 
+# ---------------- Graph Analytics API ----------------
+# ==================== GRAPH ANALYTICS ENDPOINTS ====================
+
+@app.route('/api/assets/filter-options', methods=['GET'])
+@require_role("Super_Admin", "Admin", "Faculty", "Student")
+def get_filter_options():
+    """
+    Get unique values for filter dropdowns
+    Returns distinct values for all filterable fields
+    """
+    try:
+        # Get distinct values for each filter field
+        institutes = assets.distinct('institute')
+        departments = assets.distinct('department')
+        categories = assets.distinct('category')
+        statuses = assets.distinct('status')
+        asset_names = assets.distinct('asset_name')
+        assigned_types = assets.distinct('assigned_type')
+        locations = assets.distinct('location')
+        
+        # Filter out None, empty strings, and sort
+        institutes = sorted([i for i in institutes if i and i.strip()])
+        departments = sorted([d for d in departments if d and d.strip()])
+        categories = sorted([c for c in categories if c and c.strip()])
+        statuses = sorted([s for s in statuses if s and s.strip()])
+        asset_names = sorted([a for a in asset_names if a and a.strip()])
+        assigned_types = sorted([t for t in assigned_types if t and t.strip()])
+        locations = sorted([l for l in locations if l and l.strip()])
+        
+        return jsonify({
+            'success': True,
+            'institutes': institutes,
+            'departments': departments,
+            'categories': categories,
+            'statuses': statuses,
+            'asset_names': asset_names,
+            'assigned_types': assigned_types,
+            'locations': locations
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching filter options: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to fetch filter options'
+        }), 500
+
+
+@app.route('/api/assets/stats', methods=['GET'])
+@require_role("Super_Admin", "Admin")
+def get_asset_stats():
+    """
+    Get aggregated asset statistics for graph visualization
+    Supports filters: institute, department, category, status, asset_name, assigned_type, location
+    """
+    # Get filter parameters
+    institute = (request.args.get('institute') or '').strip()
+    department = (request.args.get('department') or '').strip()
+    category = (request.args.get('category') or '').strip()
+    status = (request.args.get('status') or '').strip()
+    asset_name = (request.args.get('asset_name') or '').strip()
+    assigned_type = (request.args.get('assigned_type') or '').strip()
+    location = (request.args.get('location') or '').strip()
+    
+    # Build match stage for MongoDB aggregation
+    match_stage = {}
+    if institute:
+        match_stage['institute'] = institute
+    if department:
+        match_stage['department'] = department
+    if category:
+        match_stage['category'] = category
+    if status:
+        match_stage['status'] = status
+    if asset_name:
+        match_stage['asset_name'] = asset_name
+    if assigned_type:
+        match_stage['assigned_type'] = assigned_type
+    if location:
+        match_stage['location'] = location
+    
+    try:
+        # 1. Total asset count
+        total_assets = assets.count_documents(match_stage)
+        
+        # 2. Assets grouped by Category
+        by_category = list(assets.aggregate([
+            {'$match': match_stage},
+            {'$group': {'_id': '$category', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}}
+        ]))
+        
+        # 3. Assets grouped by Status
+        by_status = list(assets.aggregate([
+            {'$match': match_stage},
+            {'$group': {'_id': '$status', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}}
+        ]))
+        
+        # 4. Assets grouped by Department
+        by_department = list(assets.aggregate([
+            {'$match': match_stage},
+            {'$group': {'_id': '$department', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}}
+        ]))
+        
+        # 5. Assets grouped by Institute
+        by_institute = list(assets.aggregate([
+            {'$match': match_stage},
+            {'$group': {'_id': '$institute', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}}
+        ]))
+        
+        # 6. Assets grouped by Location (top 10)
+        by_location = list(assets.aggregate([
+            {'$match': match_stage},
+            {'$group': {'_id': '$location', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}},
+            {'$limit': 10}
+        ]))
+        
+        # 7. Verified vs Unverified count
+        verified_count = assets.count_documents({**match_stage, 'verified': True})
+        unverified_count = assets.count_documents({**match_stage, 'verified': {'$ne': True}})
+        
+        # 8. FIXED: Assets by Assigned Type - ONLY for SINGLE assets (without serial_no)
+        by_assigned_type = list(assets.aggregate([
+            {'$match': match_stage},
+            {'$group': {'_id': '$assigned_type', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}}
+        ]))
+        
+        # 9. SIMPLIFIED: Total assets added per date (no single/bulk breakdown)
+        try:
+            assets_by_date = list(assets.aggregate([
+                {'$match': match_stage},
+                {
+                    '$project': {
+                        'date': {
+                            '$cond': {
+                                # Check if assign_date exists and is not empty
+                                'if': {'$and': [
+                                    {'$ne': [{'$type': '$assign_date'}, 'missing']},
+                                    {'$ne': ['$assign_date', '']},
+                                    {'$ne': ['$assign_date', None]}
+                                ]},
+                                'then': '$assign_date',  # Use assign_date directly (YYYY-MM-DD format)
+                                'else': '1970-01-01'  # Default date for assets without assign_date
+                            }
+                        }
+                    }
+                },
+                # Filter out default dates
+                {'$match': {'date': {'$ne': '1970-01-01'}}},
+                {
+                    '$group': {
+                        '_id': '$date',  # Group only by date, not by type
+                        'count': {'$sum': 1}
+                    }
+                },
+                {'$sort': {'_id': 1}}  # Sort by date ascending
+            ]))
+        except Exception as date_error:
+            print(f"Error in assets_by_date aggregation: {date_error}")
+            import traceback
+            traceback.print_exc()
+            assets_by_date = []
+        
+        # AUDIT
+        # AUDIT - With filter information in resource dictionary
+        audit_log(
+            audit, 
+            request, 
+            request.user, 
+            "stats.view",
+            resource={
+                "type": "Stats",
+                "filters": {
+                    "institute": institute or None,
+                    "department": department or None,
+                    "category": category or None,
+                    "status": status or None,
+                    "asset_name": asset_name or None,
+                    "assigned_type": assigned_type or None,
+                    "location": location or None
+                }
+            },
+            ok=True, 
+            status=200
+        )
+
+
+        
+        return jsonify({
+            'success': True,
+            'total_assets': total_assets,
+            'by_category': by_category,
+            'by_status': by_status,
+            'by_department': by_department,
+            'by_institute': by_institute,
+            'by_location': by_location,
+            'by_assigned_type': by_assigned_type,  # Now only single assets
+            'verified_stats': {
+                'verified': verified_count,
+                'unverified': unverified_count
+            },
+            'assets_by_date': assets_by_date  # Now simplified - total per date
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching stats: {e}")
+        import traceback
+        traceback.print_exc()
+        audit_log(
+            audit, request, request.user, "stats.view",
+            ok=False, status=500, error=str(e)
+        )
+        return jsonify({'success': False, 'error': 'Failed to fetch statistics'}), 500
+
+
+@app.route('/api/assets/bulk-stats', methods=['GET'])
+@require_role("Super_Admin", "Admin")
+def get_bulk_asset_stats():
+    """
+    Get aggregated statistics for BULK QR codes from QrRegistry collection
+    Key metric: Linked (used=true) vs Not Linked (used=false)
+    """
+    # Get filter parameters
+    institute = (request.args.get('institute') or '').strip()
+    department = (request.args.get('department') or '').strip()
+    
+    # Build match stage for QrRegistry collection
+    match_stage = {}
+    
+    if institute:
+        match_stage['institute'] = institute
+    if department:
+        match_stage['department'] = department
+    
+    try:
+        # Access QrRegistry collection
+        qr_registry = db['QrRegistry']
+        
+        # 1. Total QR codes count
+        total_qr_codes = qr_registry.count_documents(match_stage)
+        
+        # 2. Linked (used=true) vs Not Linked (used=false) count
+        linked_count = qr_registry.count_documents({
+            **match_stage,
+            'used': True
+        })
+        
+        not_linked_count = qr_registry.count_documents({
+            **match_stage,
+            'used': False
+        })
+        
+        # 3. QR codes grouped by Institute
+        by_institute = list(qr_registry.aggregate([
+            {'$match': match_stage},
+            {'$group': {'_id': '$institute', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}}
+        ]))
+        
+        # 4. QR codes grouped by Department
+        by_department = list(qr_registry.aggregate([
+            {'$match': match_stage},
+            {'$group': {'_id': '$department', 'count': {'$sum': 1}}},
+            {'$sort': {'count': -1}}
+        ]))
+        
+        # 5. QR codes by creation date (using created_at timestamp)
+        try:
+            qr_by_date = list(qr_registry.aggregate([
+                {'$match': match_stage},
+                {
+                    '$project': {
+                        'date': {
+                            '$dateToString': {
+                                'format': '%Y-%m-%d',
+                                'date': {'$toDate': {'$multiply': ['$created_at', 1000]}}
+                            }
+                        }
+                    }
+                },
+                {
+                    '$group': {
+                        '_id': '$date',
+                        'count': {'$sum': 1}
+                    }
+                },
+                {'$sort': {'_id': 1}}
+            ]))
+        except Exception as date_error:
+            print(f"Error in qr_by_date aggregation: {date_error}")
+            import traceback
+            traceback.print_exc()
+            qr_by_date = []
+        
+        # 6. Link status (Linked/Not Linked) by Institute
+        link_status_by_institute = list(qr_registry.aggregate([
+            {'$match': match_stage},
+            {
+                '$project': {
+                    'institute': 1,
+                    'link_status': {
+                        '$cond': {
+                            'if': {'$eq': ['$used', True]},
+                            'then': 'Linked',
+                            'else': 'Not Linked'
+                        }
+                    }
+                }
+            },
+            {
+                '$group': {
+                    '_id': {
+                        'institute': '$institute',
+                        'status': '$link_status'
+                    },
+                    'count': {'$sum': 1}
+                }
+            },
+            {'$sort': {'_id.institute': 1, '_id.status': 1}}
+        ]))
+        
+        # 7. For linked QR codes, get category breakdown from Assets collection
+        # Get all linked QR IDs
+        linked_qrs = list(qr_registry.find({**match_stage, 'used': True}, {'qr_id': 1}))
+        linked_qr_ids = [qr['qr_id'] for qr in linked_qrs]
+        
+        # Query Assets collection for these QR IDs to get categories
+        by_category = []
+        if linked_qr_ids:
+            by_category = list(assets.aggregate([
+                {'$match': {'qr_id': {'$in': linked_qr_ids}}},
+                {'$group': {'_id': '$category', 'count': {'$sum': 1}}},
+                {'$sort': {'count': -1}}
+            ]))
+        
+        print(f"Bulk Stats Summary:")
+        print(f"  Total QR Codes: {total_qr_codes}")
+        print(f"  Linked: {linked_count}")
+        print(f"  Not Linked: {not_linked_count}")
+        print(f"  By Institute: {by_institute}")
+        print(f"  By Department: {by_department}")
+        print(f"  By Category (linked only): {by_category}")
+        
+        # AUDIT
+        audit_log(
+            audit, 
+            request, 
+            request.user, 
+            "bulk_stats.view",
+            resource={"type": "BulkStats"},
+            ok=True, 
+            status=200
+        )
+        
+        return jsonify({
+            'success': True,
+            'total_bulk_assets': total_qr_codes,
+            'linked_count': linked_count,
+            'not_linked_count': not_linked_count,
+            'link_status': {
+                'linked': linked_count,
+                'not_linked': not_linked_count
+            },
+            'by_institute': by_institute,
+            'by_department': by_department,
+            'by_category': by_category,
+            'assets_by_date': qr_by_date,
+            'link_status_by_institute': link_status_by_institute
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching bulk stats from QrRegistry: {e}")
+        import traceback
+        traceback.print_exc()
+        audit_log(
+            audit, request, request.user, "bulk_stats.view",
+            ok=False, status=500, error=str(e)
+        )
+        return jsonify({'success': False, 'error': 'Failed to fetch bulk QR statistics'}), 500
 
 
 # ---------------- Run ----------------

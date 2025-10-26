@@ -1,7 +1,9 @@
 import { useNavigate } from "react-router-dom";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import * as XLSX from "xlsx";
 import { saveAs } from "file-saver";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
 
 const API = "http://localhost:5000";
 
@@ -68,13 +70,164 @@ function downloadExcel(rows, filenamePrefix = "assets_report") {
   saveAs(blob, `${filenamePrefix}_${stamp}.xlsx`);
 }
 
+// Batch QR Download as single PDF
+async function downloadAllQrPdf(rows, sizeOption = "Large") {
+  const doc = new jsPDF('p', 'mm', 'a4');
+  const marginX = 16;
+  const marginY = 20;
+  const pageWidth = 210;
+  const pageHeight = 297;
+  const padding = 10;
+
+  let perRow, labelFontSize;
+  if (sizeOption === "Small") {
+    perRow = 5;
+    labelFontSize = 7;
+  } else if (sizeOption === "Medium") {
+    perRow = 4;
+    labelFontSize = 9;
+  } else {
+    perRow = 3;
+    labelFontSize = 11;
+  }
+
+  const qrSize = (pageWidth - marginX * 2 - padding * (perRow - 1)) / perRow;
+  let x = marginX;
+  let y = marginY;
+  let col = 0;
+
+  let lastRowY = 0;
+  let lastBlockHeight = 0;
+
+  function drawDottedLines(rowY, blockHeight) {
+    const dashLength = 2;
+    // Horizontal line below the row
+    let startX = marginX;
+    let lineY = rowY + blockHeight + 4;
+    doc.setLineDash([dashLength, dashLength]);
+    while (startX < pageWidth - marginX) {
+      doc.line(startX, lineY, startX + dashLength, lineY);
+      startX += dashLength * 2;
+    }
+    // Vertical dashed lines between QR codes
+    for (let colIndex = 1; colIndex < perRow; colIndex++) {
+      const lineX = marginX + colIndex * (qrSize + padding) - padding / 2;
+      let currentDotY = rowY - 2;
+      while (currentDotY < lineY + padding) {
+        doc.line(lineX, currentDotY, lineX, currentDotY + dashLength);
+        currentDotY += dashLength * 2;
+      }
+    }
+    doc.setLineDash([]);
+  }
+
+  for (let i = 0; i < rows.length; i++) {
+    const asset = rows[i];
+    const qrText = asset.registration_number || "";
+    const serialText = asset.serial_no != null ? `Serial No ${asset.serial_no}` : "No Serial";
+    const qrUrl = await generateQrPng(qrText, qrSize * 4);
+
+    doc.addImage(qrUrl, "PNG", x, y, qrSize, qrSize);
+
+    const smallerFontSize = Math.round(labelFontSize * 0.66 * 10) / 10;
+    doc.setFontSize(smallerFontSize);
+
+    const serialWidth = doc.getStringUnitWidth(serialText) * smallerFontSize / doc.internal.scaleFactor;
+    const serialX = x + (qrSize - serialWidth) / 2;
+    const serialY = y + qrSize + 2;
+    doc.text(serialText, serialX, serialY);
+
+    const label = (qrText && qrText !== "1") ? qrText : "";
+    const labelLines = label ? doc.splitTextToSize(label, qrSize) : [];
+    const lineHeight = smallerFontSize * 0.9;
+    const totalLabelHeight = labelLines.length * lineHeight;
+
+    for (let j = 0; j < labelLines.length; j++) {
+      const line = labelLines[j];
+      const lineWidth = doc.getStringUnitWidth(line) * smallerFontSize / doc.internal.scaleFactor;
+      const textX = x + (qrSize - lineWidth) / 2;
+      doc.text(line, textX, serialY + ((j + 1) * lineHeight));
+    }
+
+    lastRowY = y;
+    lastBlockHeight = qrSize + smallerFontSize / 2 + totalLabelHeight;
+
+    col++;
+    if (col >= perRow) {
+      drawDottedLines(y, lastBlockHeight);
+      col = 0;
+      x = marginX;
+      y += lastBlockHeight + padding + 2;
+      if (y + qrSize + totalLabelHeight > pageHeight - marginY) {
+        doc.addPage('a4', 'p');
+        y = marginY;
+      }
+    } else {
+      x += qrSize + padding;
+    }
+  }
+  if (col > 0) {
+    drawDottedLines(lastRowY, lastBlockHeight);
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  doc.save(`all_asset_qr_codes_${stamp}.pdf`);
+}
+
+// PDF GENERATION HELPER
+function downloadPdf(rows, filenamePrefix = "assets_report") {
+  const doc = new jsPDF("l", "mm", "a4");
+  doc.setFontSize(18);
+  doc.text("Assets Report", 14, 16);
+
+  const headers = [
+    { header: "Serial No", dataKey: "serial_no" },
+    { header: "Registration No", dataKey: "registration_number" },
+    { header: "Asset Name", dataKey: "asset_name" },
+    { header: "Category", dataKey: "category" },
+    { header: "Location", dataKey: "location" },
+    { header: "Assign Date", dataKey: "assign_date" },
+    { header: "Status", dataKey: "status" },
+    { header: "Description", dataKey: "desc" },
+    { header: "Verification Date", dataKey: "verification_date" },
+    { header: "Verified", dataKey: "verified" },
+    { header: "Verified By", dataKey: "verified_by" },
+    { header: "Institute", dataKey: "institute" },
+    { header: "Department", dataKey: "department" },
+    { header: "Assigned Type", dataKey: "assigned_type" },
+    { header: "Assigned Faculty", dataKey: "assigned_faculty_name" },
+  ];
+
+  const data = rows.map((r) => {
+    const result = {};
+    headers.forEach((h) => {
+      let val = r[h.dataKey];
+      if (h.dataKey === "verified") val = val ? "Yes" : "No";
+      result[h.dataKey] = fmt(val, "");
+    });
+    return result;
+  });
+
+  autoTable(doc, {
+    head: [headers.map((h) => h.header)],
+    body: data.map((row) => headers.map((h) => row[h.dataKey])),
+    startY: 22,
+    theme: "grid",
+    headStyles: { fillColor: [63, 81, 181], fontSize: 11, halign: "center" },
+    bodyStyles: { fontSize: 10 },
+    margin: { left: 8, right: 8 },
+    styles: { overflow: "linebreak", cellWidth: "wrap" },
+  });
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  doc.save(`${filenamePrefix}_${stamp}.pdf`);
+}
+
 export default function Assets() {
   const navigate = useNavigate();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
 
-  // Dynamic filters
   const [filter, setFilter] = useState({
     q: "",
     status: "",
@@ -86,7 +239,16 @@ export default function Assets() {
     location: "",
   });
 
-  const [detail, setDetail] = useState(null); // selected asset for details panel
+  const [detail, setDetail] = useState(null);
+
+  // Selection state for checkboxes
+  const [selectedIds, setSelectedIds] = useState([]);
+  const selectAllRef = useRef();
+
+  // Modal state for QR size selection
+  const [showQrSizeModal, setShowQrSizeModal] = useState(false);
+  const [qrRows, setQrRows] = useState([]);
+  const [qrSizeOption, setQrSizeOption] = useState("Large");
 
   useEffect(() => {
     let alive = true;
@@ -100,7 +262,6 @@ export default function Assets() {
           else throw new Error("Failed to fetch assets");
         }
         const data = await res.json();
-
         if (alive) {
           setRows(Array.isArray(data) ? data : []);
           setLoading(false);
@@ -117,20 +278,16 @@ export default function Assets() {
     };
   }, [navigate]);
 
-  // Build dynamic option sets from data
-  const options = useMemo(() => {
-    return {
-      status: uniqSorted(rows.map((r) => r.status)),
-      category: uniqSorted(rows.map((r) => r.category)),
-      assigned_type: uniqSorted(rows.map((r) => r.assigned_type)),
-      institute: uniqSorted(rows.map((r) => r.institute)),
-      department: uniqSorted(rows.map((r) => r.department)),
-      asset_name: uniqSorted(rows.map((r) => r.asset_name)),
-      location: uniqSorted(rows.map((r) => r.location)),
-    };
-  }, [rows]);
+  const options = useMemo(() => ({
+    status: uniqSorted(rows.map((r) => r.status)),
+    category: uniqSorted(rows.map((r) => r.category)),
+    assigned_type: uniqSorted(rows.map((r) => r.assigned_type)),
+    institute: uniqSorted(rows.map((r) => r.institute)),
+    department: uniqSorted(rows.map((r) => r.department)),
+    asset_name: uniqSorted(rows.map((r) => r.asset_name)),
+    location: uniqSorted(rows.map((r) => r.location)),
+  }), [rows]);
 
-  // Newest first using ObjectId time
   const sorted = useMemo(() => {
     const copy = [...rows];
     copy.sort((a, b) => {
@@ -144,7 +301,6 @@ export default function Assets() {
     return copy;
   }, [rows]);
 
-  // Apply filters
   const filtered = useMemo(() => {
     const q = filter.q.trim().toLowerCase();
     return sorted.filter((r) => {
@@ -165,7 +321,6 @@ export default function Assets() {
         ]
           .map((x) => (x || "").toString().toLowerCase())
           .some((s) => s.includes(q));
-
       const hitStatus = !filter.status || (r.status || "") === filter.status;
       const hitCat = !filter.category || (r.category || "") === filter.category;
       const hitAT = !filter.assigned_type || (r.assigned_type || "") === filter.assigned_type;
@@ -173,42 +328,99 @@ export default function Assets() {
       const hitDept = !filter.department || (r.department || "") === filter.department;
       const hitName = !filter.asset_name || (r.asset_name || "") === filter.asset_name;
       const hitLoc = !filter.location || (r.location || "") === filter.location;
-
       return hitQ && hitStatus && hitCat && hitAT && hitInst && hitDept && hitName && hitLoc;
     });
   }, [sorted, filter]);
 
-  // Download QR that includes serial text below the code and in filename
+  // Derived: selected assets (using filtered as base)
+  const selectedAssets = useMemo(() => (
+    filtered.filter((r) => selectedIds.includes(r._id))
+  ), [filtered, selectedIds]);
+
+  // Checkbox logic
+  const handleSelectAll = (checked) => {
+    setSelectedIds(checked ? filtered.map((a) => a._id) : []);
+  };
+  const handleSelectOne = (id) => {
+    setSelectedIds((curr) => (
+      curr.includes(id) ? curr.filter((x) => x !== id) : [...curr, id]
+    ));
+  };
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate =
+        selectedIds.length > 0 && selectedIds.length < filtered.length;
+    }
+  }, [selectedIds, filtered.length]);
+  const isAllSelected = filtered.length > 0 && selectedIds.length === filtered.length;
+
+  // Modified: Download actions to respect selected assets, or fallback to filtered/all
+  const handleDownloadPdf = () => {
+    const exporting = selectedAssets.length ? selectedAssets : filtered.length ? filtered : rows;
+    const prefix =
+      selectedAssets.length
+        ? "assets_report_selected"
+        : filter.q ||
+          filter.status ||
+          filter.category ||
+          filter.assigned_type ||
+          filter.institute ||
+          filter.department ||
+          filter.asset_name ||
+          filter.location
+        ? "assets_report_filtered"
+        : "assets_report_all";
+    downloadPdf(exporting, prefix);
+  };
+  const handleDownloadExcel = () => {
+    const exporting = selectedAssets.length ? selectedAssets : filtered.length ? filtered : rows;
+    const prefix =
+      selectedAssets.length
+        ? "assets_report_selected"
+        : filter.q ||
+          filter.status ||
+          filter.category ||
+          filter.assigned_type ||
+          filter.institute ||
+          filter.department ||
+          filter.asset_name ||
+          filter.location
+        ? "assets_report_filtered"
+        : "assets_report_all";
+    downloadExcel(exporting, prefix);
+  };
+  const handleBatchQrDownloadClick = () => {
+    setQrRows(selectedAssets.length ? selectedAssets : filtered.length ? filtered : rows);
+    setShowQrSizeModal(true);
+  };
+
+  const onConfirmQrSize = async () => {
+    setShowQrSizeModal(false);
+    await downloadAllQrPdf(qrRows, qrSizeOption);
+  };
+
   const onDownloadQr = async (asset) => {
     try {
       const content = asset.registration_number || "";
       const dataUrl = await generateQrPng(content, 600);
 
-      // Draw serial text below QR
-      const img = new Image();
+      const img = new window.Image();
       img.src = dataUrl;
-      await new Promise((res) => {
-        img.onload = res;
-      });
-
-      const padding = 16;
-      const textH = 34;
+      await new Promise((res) => { img.onload = res; });
+      const padding = 16; const textH = 34;
       const canvas = document.createElement("canvas");
       canvas.width = img.width + padding * 2;
       canvas.height = img.height + padding * 2 + textH;
       const ctx = canvas.getContext("2d");
-
       ctx.fillStyle = "#fff";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, padding, padding);
-
       ctx.fillStyle = "#111";
       ctx.font = "600 20px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial";
       const serial = asset.serial_no != null ? String(asset.serial_no) : "-";
       const label = `Serial No: ${serial}`;
       const w = ctx.measureText(label).width;
       ctx.fillText(label, (canvas.width - w) / 2, img.height + padding + 24);
-
       const a = document.createElement("a");
       a.href = canvas.toDataURL("image/png");
       const safeName = (asset.asset_name || "ASSET")
@@ -223,7 +435,6 @@ export default function Assets() {
     }
   };
 
-  // Delete by serial number (purges asset + all its QR rows)
   const onDeleteBySerial = async (asset) => {
     try {
       if (asset.serial_no == null) {
@@ -231,7 +442,6 @@ export default function Assets() {
         return;
       }
       if (!window.confirm(`Delete asset with Serial No ${asset.serial_no}? This cannot be undone.`)) return;
-
       const resp = await fetch(
         `${API}/api/assets/by-serial/${encodeURIComponent(asset.serial_no)}`,
         { method: "DELETE", credentials: "include" }
@@ -241,7 +451,6 @@ export default function Assets() {
         alert(ej.error || "Failed to delete.");
         return;
       }
-
       setRows((prev) => prev.filter((x) => x._id !== asset._id));
       if (detail && detail._id === asset._id) setDetail(null);
     } catch {
@@ -256,7 +465,6 @@ export default function Assets() {
       </div>
     );
   }
-
   if (err) {
     return (
       <div className="max-w-7xl mx-auto p-6">
@@ -264,7 +472,6 @@ export default function Assets() {
       </div>
     );
   }
-
   return (
     <div className="max-w-7xl mx-auto p-6">
       <div className="bg-white rounded shadow p-4">
@@ -276,20 +483,23 @@ export default function Assets() {
             </span>
             <button
               type="button"
-              onClick={() => {
-                const prefix =
-                  filter.q ||
-                  filter.status ||
-                  filter.category ||
-                  filter.assigned_type ||
-                  filter.institute ||
-                  filter.department ||
-                  filter.asset_name ||
-                  filter.location
-                    ? "assets_report_filtered"
-                    : "assets_report_all";
-                downloadExcel(filtered.length ? filtered : rows, prefix);
-              }}
+              onClick={handleDownloadPdf}
+              className="inline-flex items-center rounded bg-rose-600 text-white px-3 py-1.5 text-sm hover:bg-rose-700"
+              title="Download current view as PDF table"
+            >
+              Generate PDF
+            </button>
+            <button
+              type="button"
+              className="inline-flex items-center rounded bg-violet-600 text-white px-3 py-1.5 text-sm hover:bg-violet-700"
+              onClick={handleBatchQrDownloadClick}
+              title="Download all QRs as PDF"
+            >
+              Download QR
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadExcel}
               className="inline-flex items-center rounded bg-emerald-600 text-white px-3 py-1.5 text-sm hover:bg-emerald-700"
               title="Download current view as Excel"
             >
@@ -297,7 +507,6 @@ export default function Assets() {
             </button>
           </div>
         </div>
-
         {/* Filters */}
         <div className="mb-4 grid grid-cols-1 md:grid-cols-4 gap-3">
           <input
@@ -336,7 +545,6 @@ export default function Assets() {
               <option key={v} value={v}>{v}</option>
             ))}
           </select>
-
           <select
             className="border rounded px-3 py-2"
             value={filter.location}
@@ -378,12 +586,20 @@ export default function Assets() {
             ))}
           </select>
         </div>
-
-        {/* Table */}
+        {/* Table with checkboxes */}
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead>
               <tr className="border-b bg-gray-50">
+                <th className="px-2 py-2 text-left">
+                  <input
+                    type="checkbox"
+                    ref={selectAllRef}
+                    checked={isAllSelected}
+                    onChange={e => handleSelectAll(e.target.checked)}
+                    aria-label="Select all"
+                  />
+                </th>
                 <th className="px-3 py-2 text-left">Serial No</th>
                 <th className="px-3 py-2 text-left">Asset Name</th>
                 <th className="px-3 py-2 text-left">Location</th>
@@ -395,6 +611,14 @@ export default function Assets() {
             <tbody>
               {filtered.map((a) => (
                 <tr key={a._id} className="border-b hover:bg-gray-50">
+                  <td className="px-2 py-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.includes(a._id)}
+                      onChange={() => handleSelectOne(a._id)}
+                      aria-label="Select asset"
+                    />
+                  </td>
                   <td className="px-3 py-2">{fmt(a.serial_no)}</td>
                   <td className="px-3 py-2">{fmt(a.asset_name)}</td>
                   <td className="px-3 py-2">{fmt(a.location)}</td>
@@ -427,7 +651,7 @@ export default function Assets() {
               ))}
               {filtered.length === 0 && (
                 <tr>
-                  <td className="px-3 py-6 text-gray-500" colSpan={6}>
+                  <td className="px-3 py-6 text-gray-500" colSpan={7}>
                     No assets found. Adjust filters or add new items.
                   </td>
                 </tr>
@@ -436,8 +660,37 @@ export default function Assets() {
           </table>
         </div>
       </div>
-
-      {/* Details slide-over / modal */}
+      {showQrSizeModal && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+          <div className="bg-white rounded shadow-lg p-6 max-w-sm w-full">
+            <h3 className="mb-4 text-lg font-semibold">Select QR Code Size</h3>
+            <select
+              className="border rounded px-3 py-2 w-full mb-4"
+              value={qrSizeOption}
+              onChange={(e) => setQrSizeOption(e.target.value)}
+              aria-label="QR code size selection"
+            >
+              <option>Large</option>
+              <option>Medium</option>
+              <option>Small</option>
+            </select>
+            <div className="flex justify-end gap-3">
+              <button
+                className="px-4 py-2 rounded bg-gray-300 hover:bg-gray-400"
+                onClick={() => setShowQrSizeModal(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-4 py-2 rounded bg-violet-600 text-white hover:bg-violet-700"
+                onClick={onConfirmQrSize}
+              >
+                Generate PDF
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {detail && (
         <div className="fixed inset-0 bg-black/30 flex items-start md:items-center justify-center p-4 z-50">
           <div className="w-full max-w-2xl bg-white rounded shadow-lg">
@@ -450,7 +703,6 @@ export default function Assets() {
                 ✕
               </button>
             </div>
-
             <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
               <Field label="Serial No" value={fmt(detail.serial_no)} />
               <Field label="Registration Number" value={fmt(detail.registration_number)} />
@@ -468,7 +720,6 @@ export default function Assets() {
               <Field label="Assigned Type" value={fmt(detail.assigned_type)} />
               <Field label="Assigned Faculty Name" value={fmt(detail.assigned_faculty_name)} />
             </div>
-
             <div className="px-4 py-3 border-t flex items-center justify-end gap-2">
               <button
                 onClick={() => onDownloadQr(detail)}

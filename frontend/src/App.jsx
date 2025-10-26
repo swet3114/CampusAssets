@@ -11,6 +11,7 @@ import RoleGate from "./middle/RoleGate";
 import Profile from "./components/Profile";
 import BulkAddAssets from "./components/BulkAddAssets";
 import BulkInventory from "./components/BulkInventory";
+import GraphView from "./components/GraphView";
 
 // NEW: History Logs page (create this file)
 import HistoryLogs from "./components/HistoryLogs";
@@ -149,6 +150,21 @@ export default function App() {
             </Protected>
           }
         />
+
+
+        <Route
+          path="/graph-view"
+          element={
+            <Protected>
+              <ProtectedLayout>
+                <RoleGate allow={["Super_Admin", "Admin"]}>
+                  <GraphView />
+                </RoleGate>
+              </ProtectedLayout>
+            </Protected>
+          }
+        />
+        
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>

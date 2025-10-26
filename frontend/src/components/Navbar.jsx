@@ -143,6 +143,13 @@ export default function Navbar() {
               >
                 History Logs
               </NavLink>
+              <NavLink
+                to="/graph-view"
+                className={({ isActive }) => `${linkBase} ${isActive ? activeClass : ""}`}
+                onClick={() => setOpen(false)}
+              >
+                See Graphs
+              </NavLink>
             </div>
           </nav>
         </div>
