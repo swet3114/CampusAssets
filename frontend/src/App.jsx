@@ -12,6 +12,7 @@ import Profile from "./components/Profile";
 import BulkAddAssets from "./components/BulkAddAssets";
 import BulkInventory from "./components/BulkInventory";
 import GraphView from "./components/GraphView";
+import MasterDataManager from "./components/MasterDataManager";
 
 // NEW: History Logs page (create this file)
 import HistoryLogs from "./components/HistoryLogs";
@@ -66,6 +67,19 @@ export default function App() {
               <ProtectedLayout>
                 <RoleGate allow={["Super_Admin", "Admin", "Faculty"]}>
                   <Assets />
+                </RoleGate>
+              </ProtectedLayout>
+            </Protected>
+          }
+        />
+
+        <Route
+          path="/masterdatamanager"
+          element={
+            <Protected>
+              <ProtectedLayout>
+                <RoleGate allow={["Super_Admin"]}>
+                  <MasterDataManager />
                 </RoleGate>
               </ProtectedLayout>
             </Protected>

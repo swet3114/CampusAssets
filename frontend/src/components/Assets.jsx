@@ -49,6 +49,8 @@ function downloadExcel(rows, filenamePrefix = "assets_report") {
     "department",
     "assigned_type",
     "assigned_faculty_name",
+    "employee_code",     // Add this
+    "bill_no"   // And this
   ];
 
   const data = rows.map((r) => {
@@ -237,6 +239,7 @@ export default function Assets() {
     department: "",
     asset_name: "",
     location: "",
+    linked:"",
   });
 
   const [detail, setDetail] = useState(null);
@@ -301,6 +304,17 @@ export default function Assets() {
     return copy;
   }, [rows]);
 
+  const isLinked = (asset) => {
+    return !!(
+      asset.location &&
+      asset.assign_date &&
+      asset.status &&
+      asset.institute &&
+      asset.department &&
+      asset.assigned_type
+    );
+  };
+
   const filtered = useMemo(() => {
     const q = filter.q.trim().toLowerCase();
     return sorted.filter((r) => {
@@ -328,7 +342,15 @@ export default function Assets() {
       const hitDept = !filter.department || (r.department || "") === filter.department;
       const hitName = !filter.asset_name || (r.asset_name || "") === filter.asset_name;
       const hitLoc = !filter.location || (r.location || "") === filter.location;
-      return hitQ && hitStatus && hitCat && hitAT && hitInst && hitDept && hitName && hitLoc;
+
+
+      const linkedNow = isLinked(r);
+      const hitLinked =
+        !filter.linked ||
+        (filter.linked === "linked" && linkedNow) ||
+        (filter.linked === "not_linked" && !linkedNow);
+
+      return hitQ && hitStatus && hitCat && hitAT && hitInst && hitDept && hitName && hitLoc && hitLinked;
     });
   }, [sorted, filter]);
 
@@ -509,12 +531,7 @@ export default function Assets() {
         </div>
         {/* Filters */}
         <div className="mb-4 grid grid-cols-1 md:grid-cols-4 gap-3">
-          <input
-            className="border rounded px-3 py-2"
-            placeholder="Search text"
-            value={filter.q}
-            onChange={(e) => setFilter((f) => ({ ...f, q: e.target.value }))}
-          />
+          
           <select
             className="border rounded px-3 py-2"
             value={filter.institute}
@@ -585,6 +602,18 @@ export default function Assets() {
               <option key={v} value={v}>{v}</option>
             ))}
           </select>
+
+          <select
+            className="border rounded px-3 py-2"
+            value={filter.linked}
+            onChange={e => setFilter(f => ({ ...f, linked: e.target.value }))}
+          >
+            <option value="">All Linked Status</option>
+            <option value="linked">Linked</option>
+            <option value="not_linked">Not Linked</option>
+          </select>
+
+          
         </div>
         {/* Table with checkboxes */}
         <div className="overflow-x-auto">
@@ -718,7 +747,10 @@ export default function Assets() {
               <Field label="Institute" value={fmt(detail.institute)} />
               <Field label="Department" value={fmt(detail.department)} />
               <Field label="Assigned Type" value={fmt(detail.assigned_type)} />
-              <Field label="Assigned Faculty Name" value={fmt(detail.assigned_faculty_name)} />
+              <Field label="Assigned Faculty Name/Staff" value={fmt(detail.assigned_faculty_name)} />
+              <Field label="Employee Code" value={fmt(detail.employee_code)} />
+              <Field label="Bill No" value={fmt(detail.bill_no)} />
+
             </div>
             <div className="px-4 py-3 border-t flex items-center justify-end gap-2">
               <button

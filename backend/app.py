@@ -32,6 +32,7 @@ AUDIT_COLLECTION = os.getenv("AUDIT_COLLECTION", "AuditLogs")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 SIGNUP_SECRET = os.getenv("SECRET_KEY", "")
 
+
 client = MongoClient(MONGO_URL)
 db = client[DB_NAME]
 assets = db[ASSETS_COLLECTION]
@@ -343,6 +344,9 @@ def create_assets_bulk():
     department = (data.get("department") or "").strip()
     assigned_type = (data.get("assigned_type") or "general").strip().lower()
     assigned_faculty_name = (data.get("assigned_faculty_name") or "").strip()
+    employee_code = (data.get("employee_code") or "").strip()
+    bill_no = (data.get("bill_no") or "").strip()
+
 
     try:
         quantity = int(data.get("quantity") or 1)
@@ -352,8 +356,8 @@ def create_assets_bulk():
     missing = []
     if not asset_name: missing.append("asset_name")
     if not category: missing.append("category")
-    if not location: missing.append("location")
-    if not status: missing.append("status")
+    if not institute: missing.append("institute")
+    if not department: missing.append("department")
     if assigned_type not in ("individual", "general"):
         return jsonify({"error": "assigned_type must be 'individual' or 'general'"}), 400
     if assigned_type == "individual" and not assigned_faculty_name:
@@ -365,7 +369,7 @@ def create_assets_bulk():
         return jsonify({"error": "quantity must be between 1 and 1000"}), 400
 
     allowed_status = {"active", "inactive", "repair", "scrape", "damage"}
-    if status not in allowed_status:
+    if status and status not in allowed_status:
         return jsonify({"error": f"status must be one of {sorted(list(allowed_status))}"}), 400
 
     if assign_date:
@@ -397,6 +401,8 @@ def create_assets_bulk():
             "department": department,
             "assigned_type": assigned_type,
             "assigned_faculty_name": assigned_faculty_name if assigned_type == "individual" else "",
+            "employee_code": employee_code if assigned_type == "individual" else "",
+            "bill_no": bill_no,
             "created_at": now_ts,
         })
 
@@ -438,22 +444,23 @@ def create_asset_single():
     location = (data.get("location") or "").strip()
     assign_date = (data.get("assign_date") or "").strip()
     status = (data.get("status") or "").strip()
-
     desc = (data.get("desc") or "").strip()
     verification_date = (data.get("verification_date") or "").strip()
     verified = bool(data.get("verified", False))
     verified_by = (data.get("verified_by") or "").strip()
-
     institute = (data.get("institute") or "").strip()
     department = (data.get("department") or "").strip()
     assigned_type = (data.get("assigned_type") or "general").strip().lower()
     assigned_faculty_name = (data.get("assigned_faculty_name") or "").strip()
+    # --- NEW FIELDS ---
+    employee_code = (data.get("employee_code") or "").strip()
+    bill_no = (data.get("bill_no") or "").strip()
 
     missing = []
     if not asset_name: missing.append("asset_name")
     if not category: missing.append("category")
-    if not location: missing.append("location")
-    if not status: missing.append("status")
+    if not institute: missing.append("institute")
+    if not department: missing.append("department")
     if assigned_type not in ("individual", "general"):
         return jsonify({"error": "assigned_type must be 'individual' or 'general'"}), 400
     if assigned_type == "individual" and not assigned_faculty_name:
@@ -485,6 +492,8 @@ def create_asset_single():
         "department": department,
         "assigned_type": assigned_type,
         "assigned_faculty_name": assigned_faculty_name if assigned_type == "individual" else "",
+        "employee_code": employee_code if assigned_type == "individual" else "",
+        "bill_no": bill_no,
         "created_at": int(time.time()),
     }
 
@@ -500,6 +509,7 @@ def create_asset_single():
     )
 
     return jsonify(doc), 201
+
 
 @app.route("/api/assets", methods=["GET"])
 @require_auth
@@ -546,7 +556,7 @@ def update_asset(id):
     allowed = [
         "asset_name", "category", "location", "assign_date", "status",
         "desc", "verification_date", "verified", "verified_by", "institute", "department",
-        "assigned_type", "assigned_faculty_name"
+        "assigned_type", "assigned_faculty_name","employee_code","bill_no"
     ]
     update = {}
     for f in allowed:
@@ -1047,7 +1057,7 @@ def bulk_update_by_serial():
     allowed_fields = [
         "qr_id", "institute", "department", "ts", "used", "linked_at", "registration_number",
         "asset_name", "category", "location", "assign_date", "status", "desc",
-        "verification_date", "verified", "verified_by", "assigned_type", "assigned_faculty_name"
+        "verification_date", "verified", "verified_by", "assigned_type", "assigned_faculty_name","employee_code","bill_no"
     ]
     results = []
     qr_registry = db["QrRegistry"]
@@ -1133,7 +1143,7 @@ def import_excel_single():
     allowed_fields = [
         "registration_number", "asset_name", "category", "location", "assign_date",
         "status", "desc", "verification_date", "verified", "verified_by",
-        "institute", "department", "assigned_type", "assigned_faculty_name"
+        "institute", "department", "assigned_type", "assigned_faculty_name","employee_code","bill_no"
     ]
     update_fields = {k: asset_data[k] for k in allowed_fields if k in asset_data and k not in ["serial_no", "verified_by"]}
     # System-controlled fields:
@@ -1530,6 +1540,44 @@ def get_bulk_asset_stats():
             ok=False, status=500, error=str(e)
         )
         return jsonify({'success': False, 'error': 'Failed to fetch bulk QR statistics'}), 500
+
+MASTER_COLLECTIONS = {
+    'asset-names': db.asset_names,
+    'institutes': db.institutes,
+    'departments': db.departments
+}
+
+
+
+from flask import Blueprint, request, jsonify
+master_api = Blueprint('master_api', __name__)
+
+@master_api.route('/api/setup/<key>', methods=['GET', 'POST'])
+def master_list(key):
+    col = MASTER_COLLECTIONS.get(key)
+    if not col:
+        return jsonify({'error': 'Bad master key'}), 404
+    if request.method == 'GET':
+        return jsonify([doc['name'] for doc in col.find({}, {'name': 1, '_id': 0})])
+    elif request.method == 'POST':
+        # Add auth check here for Super_Admin
+        name = (request.json.get('name') or '').strip()
+        if not name:
+            return jsonify({'error': 'Name required'}), 400
+        col.update_one({'name': name}, {'$set': {'name': name}}, upsert=True)
+        return jsonify({'ok': True, 'name': name})
+
+
+@master_api.route('/api/setup/<key>/<name>', methods=['DELETE'])
+@require_role('Super_Admin')  # or your auth decorator
+def master_delete(key, name):
+    col = MASTER_COLLECTIONS.get(key)
+    if not col:
+        return jsonify({'error': 'Bad master key'}), 404
+    col.delete_one({'name': name})
+    return jsonify({'ok': True})
+
+
 
 
 # ---------------- Run ----------------

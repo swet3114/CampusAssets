@@ -38,18 +38,33 @@ export default function Home() {
 
         {/* Action Buttons */}
         <div className="mt-10 flex items-center justify-center gap-3 flex-wrap">
+
+
+          <Link
+            to="/masterdatamanager"
+            className="rounded-xl bg-indigo-500 text-white px-5 py-2.5 shadow-md hover:bg-indigo-600 hover:shadow-lg transition"
+          >
+            Manage Master Data
+          </Link>
+
           <Link
             to="/assets/new"
             className="rounded-xl bg-indigo-500 text-white px-5 py-2.5 shadow-md hover:bg-indigo-600 hover:shadow-lg transition"
           >
-            Add Single Asset
+            Add Asset
           </Link>
+
+
+          {/*
           <Link
             to="/bulkasset"
             className="rounded-xl bg-emerald-500 text-white px-5 py-2.5 shadow-md hover:bg-emerald-600 hover:shadow-lg transition"
           >
             Add Bulk Assets
           </Link>
+          */}
+
+
           <Link
             to="/scan"
             className="rounded-xl bg-sky-500 text-white px-5 py-2.5 shadow-md hover:bg-sky-600 hover:shadow-lg transition"
@@ -62,12 +77,16 @@ export default function Home() {
           >
             View Inventory
           </Link>
+
+
+          {/*
           <Link
             to="/bulk-inventory"
             className="rounded-xl bg-slate-600 text-white px-5 py-2.5 shadow-md hover:bg-slate-700 hover:shadow-lg transition"
           >
             View Bulk Inventory
           </Link>
+          */}
 
           <Link
             to="/admin/history"

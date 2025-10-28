@@ -33,6 +33,8 @@ export default function Scan() {
     department: "",
     assigned_type: "general",
     assigned_faculty_name: "",
+    employee_code: "",    // Add this
+    bill_no: "", 
   });
 
   const needsFaculty = form.assigned_type === "individual";
@@ -113,6 +115,8 @@ export default function Scan() {
             assigned_type: qr.assigned_type || "general",
             assigned_faculty_name:
               (qr.assigned_type || "general") === "individual" ? (qr.assigned_faculty_name || "") : "",
+            employee_code: qr.employee_code || "",   // for bulk
+            bill_no: qr.bill_no || "",
           });
           return;
         }
@@ -156,6 +160,8 @@ export default function Scan() {
         assigned_type: data.assigned_type || "general",
         assigned_faculty_name:
           (data.assigned_type || "general") === "individual" ? (data.assigned_faculty_name || "") : "",
+        employee_code: data.employee_code || "",   // for bulk
+        bill_no: data.bill_no || "",
       });
     } catch {
       setStatusMsg({ ok: false, msg: "Network error" });
@@ -237,6 +243,8 @@ export default function Scan() {
           department: form.department,
           assigned_type: form.assigned_type,
           assigned_faculty_name: needsFaculty ? form.assigned_faculty_name : "",
+          employee_code: form.employee_code,  // Added here
+          bill_no: form.bill_no,  
         };
 
         const res = await fetch(`${API}/api/qr/${encodeURIComponent(qrDoc.qr_id)}`, {
@@ -274,6 +282,8 @@ export default function Scan() {
           assigned_faculty_name: needsFaculty ? form.assigned_faculty_name : "",
           verified: !!form.verified,
           verified_by: form.verified_by,
+          employee_code: form.employee_code,  // Add this
+          bill_no: form.bill_no  
         };
 
         const res = await fetch(`${API}/api/assets/${asset._id}`, {
@@ -511,6 +521,31 @@ export default function Scan() {
                   required={needsFaculty}
                 />
               </div>
+
+
+
+              <div>
+                <label className="block text-sm mb-1">Employee Code</label>
+                <input
+                  className="w-full border rounded px-3 py-2"
+                  name="employee_code"
+                  value={form.employee_code}
+                  onChange={onChange}
+                />
+              </div>
+              <div>
+                <label className="block text-sm mb-1">Bill No</label>
+                <input
+                  className="w-full border rounded px-3 py-2"
+                  name="bill_no"
+                  value={form.bill_no}
+                  onChange={onChange}
+                />
+              </div>
+
+
+
+
               <div className="md:col-span-2">
                 <label className="block text-sm mb-1">Description</label>
                 <textarea
